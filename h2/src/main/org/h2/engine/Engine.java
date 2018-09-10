@@ -82,7 +82,6 @@ public class Engine implements SessionFactory {
                 DATABASES.put(name, database);
             }
         }
-
         if (opened) {
             // start the thread when already synchronizing on the database
             // otherwise a deadlock can occur when the writer thread
@@ -101,6 +100,7 @@ public class Engine implements SessionFactory {
                     }
                 }
             }
+            //opened为true说明是是新打开数据库，如果user是null说明用户验证失败
             if (opened && (user == null || !user.isAdmin())) {
                 // reset - because the user is not an admin, and has no
                 // right to listen to exceptions

@@ -76,6 +76,7 @@ public class TestFunctions extends TestBase implements AggregateFunction {
     @Override
     public void test() throws Exception {
         deleteDb("functions");
+        testOverrideAlias();
         testIfNull();
         testToDate();
         testToDateException();
@@ -113,7 +114,11 @@ public class TestFunctions extends TestBase implements AggregateFunction {
         testTranslate();
         testGenerateSeries();
         testFileWrite();
+        testThatCurrentTimestampIsSane();
+        testThatCurrentTimestampStaysTheSameWithinATransaction();
+        testThatCurrentTimestampUpdatesOutsideATransaction();
         testAnnotationProcessorsOutput();
+        testRound();
 
         deleteDb("functions");
     }
@@ -175,7 +180,7 @@ public class TestFunctions extends TestBase implements AggregateFunction {
      * @param conn the connection
      * @return a result set
      */
-    public static ResultSet simpleFunctionTable(Connection conn) {
+    public static ResultSet simpleFunctionTable(@SuppressWarnings("unused") Connection conn) {
         SimpleResultSet result = new SimpleResultSet();
         result.addColumn("A", Types.INTEGER, 0, 0);
         result.addColumn("B", Types.CHAR, 0, 0);
@@ -363,7 +368,7 @@ public class TestFunctions extends TestBase implements AggregateFunction {
         ResultSet rs;
         rs = stat.executeQuery("select * from information_schema.views");
         rs.next();
-        assertTrue(rs.getString("VIEW_DEFINITION").contains("SCHEMA2.FUNC"));
+        assertContains(rs.getString("VIEW_DEFINITION"), "SCHEMA2.FUNC");
 
         stat.execute("drop view test");
         stat.execute("drop schema schema2");
@@ -1281,6 +1286,7 @@ public class TestFunctions extends TestBase implements AggregateFunction {
                 String.format("SELECT ORA_HASH('%s', 0) FROM DUAL", testStr));
         assertResult(String.valueOf("foo".hashCode()), stat,
                 String.format("SELECT ORA_HASH('%s', 0, 0) FROM DUAL", testStr));
+        conn.close();
     }
 
     private void testToDateException() {
@@ -1291,12 +1297,17 @@ public class TestFunctions extends TestBase implements AggregateFunction {
         }
 
         try {
-            ToDateParser.toDate("1-DEC-0000","DD-MON-RRRR");
+            ToDateParser.toDate("1-DEC-0000", "DD-MON-RRRR");
             fail("Oracle to_date should reject year 0 (ORA-01841)");
-        } catch (Exception e) { }
+        } catch (Exception e) {
+            // expected
+        }
     }
 
     private void testToDate() throws ParseException {
+        if (Locale.getDefault() != Locale.ENGLISH) {
+            return;
+        }
 
         final int month = Calendar.getInstance().get(Calendar.MONTH);
 
@@ -1540,7 +1551,7 @@ public class TestFunctions extends TestBase implements AggregateFunction {
         expected = expected.substring(0, 1).toUpperCase() + expected.substring(1);
         String spaces = "         ";
         String first9 = (expected + spaces).substring(0, 9);
-        assertResult(first9.toUpperCase(),
+        assertResult(StringUtils.toUpperEnglish(first9),
                 stat, "SELECT TO_CHAR(X, 'DAY') FROM T");
         assertResult(first9,
                 stat, "SELECT TO_CHAR(X, 'Day') FROM T");
@@ -1661,7 +1672,9 @@ public class TestFunctions extends TestBase implements AggregateFunction {
 
         conn.close();
     }
+
     private void testIfNull() throws SQLException {
+        deleteDb("functions");
         Connection conn = getConnection("functions");
         Statement stat = conn.createStatement(
                 ResultSet.TYPE_SCROLL_INSENSITIVE, ResultSet.CONCUR_READ_ONLY);
@@ -2002,24 +2015,144 @@ public class TestFunctions extends TestBase implements AggregateFunction {
         }
     }
 
-    private void callCompiledFunction(String functionName) throws SQLException {
+    private void testRound() throws SQLException {
         deleteDb("functions");
+
         Connection conn = getConnection("functions");
         Statement stat = conn.createStatement();
-        ResultSet rs;
-        stat.execute("create alias " + functionName + " AS "
-                + "$$ boolean " + functionName + "() "
-                + "{ return true; } $$;");
 
-        PreparedStatement stmt = conn.prepareStatement(
-                "select " + functionName + "() from dual");
-        rs = stmt.executeQuery();
+        final ResultSet rs = stat.executeQuery(
+                "select ROUND(-1.2), ROUND(-1.5), ROUND(-1.6), " +
+                "ROUND(2), ROUND(1.5), ROUND(1.8), ROUND(1.1) from dual");
+
         rs.next();
-        assertEquals(Boolean.class.getName(), rs.getObject(1).getClass().getName());
+        assertEquals(-1, rs.getInt(1));
+        assertEquals(-2, rs.getInt(2));
+        assertEquals(-2, rs.getInt(3));
+        assertEquals(2, rs.getInt(4));
+        assertEquals(2, rs.getInt(5));
+        assertEquals(2, rs.getInt(6));
+        assertEquals(1, rs.getInt(7));
 
-        stat.execute("drop alias " + functionName + "");
-
+        rs.close();
         conn.close();
+    }
+
+    private void testThatCurrentTimestampIsSane() throws SQLException,
+            ParseException {
+        deleteDb("functions");
+
+        Date before = new Date();
+
+        Connection conn = getConnection("functions");
+        conn.setAutoCommit(false);
+        Statement stat = conn.createStatement();
+
+
+        final String formatted;
+        final ResultSet rs = stat.executeQuery(
+                "select to_char(current_timestamp(9), 'YYYY MM DD HH24 MI SS FF3') from dual");
+        rs.next();
+        formatted = rs.getString(1);
+        rs.close();
+
+        Date after = new Date();
+
+        Date parsed = new SimpleDateFormat("y M d H m s S").parse(formatted);
+
+        assertFalse(parsed.before(before));
+        assertFalse(parsed.after(after));
+        conn.close();
+    }
+
+
+    private void testThatCurrentTimestampStaysTheSameWithinATransaction()
+            throws SQLException, InterruptedException {
+        deleteDb("functions");
+        Connection conn = getConnection("functions");
+        conn.setAutoCommit(false);
+        Statement stat = conn.createStatement();
+
+        Timestamp first;
+        ResultSet rs = stat.executeQuery("select CURRENT_TIMESTAMP from DUAL");
+        rs.next();
+        first = rs.getTimestamp(1);
+        rs.close();
+
+        Thread.sleep(1);
+
+        Timestamp second;
+        rs = stat.executeQuery("select CURRENT_TIMESTAMP from DUAL");
+        rs.next();
+        second = rs.getTimestamp(1);
+        rs.close();
+
+        assertEquals(first, second);
+        conn.close();
+    }
+
+    private void testThatCurrentTimestampUpdatesOutsideATransaction()
+            throws SQLException, InterruptedException {
+        deleteDb("functions");
+        Connection conn = getConnection("functions");
+        conn.setAutoCommit(true);
+        Statement stat = conn.createStatement();
+
+        Timestamp first;
+        ResultSet rs = stat.executeQuery("select CURRENT_TIMESTAMP from DUAL");
+        rs.next();
+        first = rs.getTimestamp(1);
+        rs.close();
+
+        Thread.sleep(1);
+
+        Timestamp second;
+        rs = stat.executeQuery("select CURRENT_TIMESTAMP from DUAL");
+        rs.next();
+        second = rs.getTimestamp(1);
+        rs.close();
+
+        assertTrue(second.after(first));
+        conn.close();
+    }
+
+    private void testOverrideAlias()
+            throws SQLException, InterruptedException {
+        deleteDb("functions");
+        Connection conn = getConnection("functions");
+        conn.setAutoCommit(true);
+        Statement stat = conn.createStatement();
+
+        assertThrows(ErrorCode.FUNCTION_ALIAS_ALREADY_EXISTS_1, stat).execute("create alias CURRENT_TIMESTAMP for \"" +
+                getClass().getName() + ".currentTimestamp\"");
+
+        stat.execute("set BUILTIN_ALIAS_OVERRIDE true");
+        
+        stat.execute("create alias CURRENT_TIMESTAMP for \"" +
+                getClass().getName() + ".currentTimestampOverride\"");
+        
+        assertCallResult("3141", stat, "CURRENT_TIMESTAMP");
+        
+        conn.close();
+    }
+
+    private void callCompiledFunction(String functionName) throws SQLException {
+        deleteDb("functions");
+        try (Connection conn = getConnection("functions")) {
+            Statement stat = conn.createStatement();
+            ResultSet rs;
+            stat.execute("create alias " + functionName + " AS "
+                    + "$$ boolean " + functionName + "() "
+                    + "{ return true; } $$;");
+
+            PreparedStatement stmt = conn.prepareStatement(
+                    "select " + functionName + "() from dual");
+            rs = stmt.executeQuery();
+            rs.next();
+            assertEquals(Boolean.class.getName(), rs.getObject(1).getClass().getName());
+
+            stat.execute("drop alias " + functionName + "");
+        }
     }
 
     private void assertCallResult(String expected, Statement stat, String sql)
@@ -2152,7 +2285,7 @@ public class TestFunctions extends TestBase implements AggregateFunction {
      * @param conn the connection
      * @return the result set
      */
-    public static ResultSet nullResultSet(Connection conn) {
+    public static ResultSet nullResultSet(@SuppressWarnings("unused") Connection conn) {
         return null;
     }
 
@@ -2319,6 +2452,13 @@ public class TestFunctions extends TestBase implements AggregateFunction {
             buff.append(a);
         }
         return new Object[] { buff.toString() };
+    }
+    
+    /**
+     * This method is called via reflection from the database.
+     */
+    public static long currentTimestampOverride() {
+        return 3141;
     }
 
     @Override

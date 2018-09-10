@@ -14,7 +14,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
-
 import org.h2.mvstore.type.DataType;
 import org.h2.mvstore.type.ObjectDataType;
 import org.h2.util.New;
@@ -60,14 +59,18 @@ public class MVMap<K, V> extends AbstractMap<K, V>
     private ConcurrentArrayList<Page> oldRoots =
             new ConcurrentArrayList<Page>();
 
-    private boolean closed;
+
+    /**
+     * Whether the map is closed. Volatile so we don't accidentally write to a
+     * closed map in multithreaded mode.
+     */
+    private volatile boolean closed;
     private boolean readOnly;
     private boolean isVolatile;
 
     protected MVMap(DataType keyType, DataType valueType) {
         this.keyType = keyType;
         this.valueType = valueType;
-        this.root = Page.createEmpty(this,  -1);
     }
 
     /**
@@ -101,6 +104,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
         this.id = DataUtils.readHexInt(config, "id", 0);
         this.createVersion = DataUtils.readHexLong(config, "createVersion", 0);
         this.writeVersion = store.getCurrentVersion();
+        this.root = Page.createEmpty(this,  -1);
     }
 
     /**
@@ -121,23 +125,6 @@ public class MVMap<K, V> extends AbstractMap<K, V>
         Object result = put(p, v, key, value);
         newRoot(p);
         return (V) result;
-    }
-
-    /**
-     * Add or replace a key-value pair in a branch.
-     *
-     * @param root the root page
-     * @param key the key (may not be null)
-     * @param value the value (may not be null)
-     * @return the new root page
-     */
-    synchronized Page putBranch(Page root, K key, V value) {
-        DataUtils.checkArgument(value != null, "The value may not be null");
-        long v = writeVersion;
-        Page p = root.copy(v);
-        p = splitRootIfNeeded(p, v);
-        put(p, v, key, value);
-        return p;
     }
 
     /**
@@ -479,30 +466,6 @@ public class MVMap<K, V> extends AbstractMap<K, V>
     @Override
     public boolean containsKey(Object key) {
         return get(key) != null;
-    }
-
-    /**
-     * Get the value for the given key, or null if not found.
-     *
-     * @param p the parent page
-     * @param key the key
-     * @return the page or null
-     */
-    protected Page binarySearchPage(Page p, Object key) {
-        int x = p.binarySearch(key);
-        if (!p.isLeaf()) {
-            if (x < 0) {
-                x = -x - 1;
-            } else {
-                x++;
-            }
-            p = p.getChildPage(x);
-            return binarySearchPage(p, key);
-        }
-        if (x >= 0) {
-            return p;
-        }
-        return null;
     }
 
     /**

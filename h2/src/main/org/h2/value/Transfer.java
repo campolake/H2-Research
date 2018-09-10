@@ -387,11 +387,6 @@ public class Transfer {
             }
             break;
         }
-        case Value.TIMESTAMP_UTC: {
-            ValueTimestampUtc ts = (ValueTimestampUtc) v;
-            writeLong(ts.getUtcDateTimeNanos());
-            break;
-        }
         case Value.TIMESTAMP_TZ: {
             ValueTimestampTimeZone ts = (ValueTimestampTimeZone) v;
             writeLong(ts.getDateValue());
@@ -499,6 +494,11 @@ public class Transfer {
             }
             break;
         }
+        case Value.ENUM: {
+            writeInt(v.getInt());
+            writeString(v.getString());
+            break;
+        }
         case Value.RESULT_SET: {
             try {
                 ResultSet rs = ((ValueResultSet) v).getResultSet();
@@ -535,6 +535,10 @@ public class Transfer {
             }
             break;
         default:
+            if (JdbcUtils.customDataTypesHandler != null) {
+                writeBytes(v.getBytesNoCopy());
+                break;
+            }
             throw DbException.get(ErrorCode.CONNECTION_BROKEN_1, "type=" + type);
         }
     }
@@ -585,9 +589,6 @@ public class Transfer {
             return ValueTimestamp.fromMillisNanos(readLong(),
                     readInt() % 1000000);
         }
-        case Value.TIMESTAMP_UTC: {
-            return ValueTimestampUtc.fromNanos(readLong());
-        }
         case Value.TIMESTAMP_TZ: {
             return ValueTimestampTimeZone.fromDateValueAndNanos(readLong(),
                     readLong(), (short) readInt());
@@ -598,6 +599,11 @@ public class Transfer {
             return ValueDouble.get(readDouble());
         case Value.FLOAT:
             return ValueFloat.get(readFloat());
+        case Value.ENUM: {
+            final int ordinal = readInt();
+            final String label = readString();
+            return ValueEnumBase.get(label, ordinal);
+        }
         case Value.INT:
             return ValueInt.get(readInt());
         case Value.LONG:
@@ -609,11 +615,13 @@ public class Transfer {
         case Value.STRING_IGNORECASE:
             return ValueStringIgnoreCase.get(readString());
         case Value.STRING_FIXED:
-            return ValueStringFixed.get(readString());
+            return ValueStringFixed.get(readString(), ValueStringFixed.PRECISION_DO_NOT_TRIM, null);
         case Value.BLOB: {
             long length = readLong();
             if (version >= Constants.TCP_PROTOCOL_VERSION_11) {
                 if (length == -1) {
+                    //从服务器端返回lob数据时走这个代码分支，
+                    //注意，这里还没开始传lob字节流，等到客户端发LOB_READ指令时才开始传
                     int tableId = readInt();
                     long id = readLong();
                     byte[] hmac;
@@ -714,6 +722,10 @@ public class Transfer {
             }
             return ValueGeometry.get(readString());
         default:
+            if (JdbcUtils.customDataTypesHandler != null) {
+                return JdbcUtils.customDataTypesHandler.convert(
+                        ValueBytes.getNoCopy(readBytes()), type);
+            }
             throw DbException.get(ErrorCode.CONNECTION_BROKEN_1, "type=" + type);
         }
     }

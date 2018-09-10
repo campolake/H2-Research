@@ -13,8 +13,8 @@ import java.io.InputStream;
 import java.io.Reader;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
-
 import org.h2.engine.Constants;
+import org.h2.engine.Mode;
 import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
 import org.h2.mvstore.DataUtils;
@@ -23,6 +23,7 @@ import org.h2.store.FileStore;
 import org.h2.store.FileStoreInputStream;
 import org.h2.store.FileStoreOutputStream;
 import org.h2.store.fs.FileUtils;
+import org.h2.table.Column;
 import org.h2.util.IOUtils;
 import org.h2.util.MathUtils;
 import org.h2.util.SmallLRUCache;
@@ -44,6 +45,9 @@ import org.h2.util.Utils;
  *
  * Data compression is supported.
  */
+//不用于客户端与服务器端的网络传输了，而是用ValueLobDb来替换，
+//这个类用于Data类的readValue和writeValue方法中，
+//兼容老的PageStore存储引擎，存储BLOB/CLOB数据，包括对一些中间记录的BLOB/CLOB字段的序列化与反序列化。
 public class ValueLob extends Value {
 
     /**
@@ -222,9 +226,8 @@ public class ValueLob extends Value {
 
     private void createFromReader(char[] buff, int len, Reader in,
             long remaining, DataHandler h) throws IOException {
-        FileStoreOutputStream out = initLarge(h);
-        boolean compress = h.getLobCompressionAlgorithm(Value.CLOB) != null;
-        try {
+        try (FileStoreOutputStream out = initLarge(h)) {
+            boolean compress = h.getLobCompressionAlgorithm(Value.CLOB) != null;
             while (true) {
                 precision += len;
                 byte[] b = new String(buff, 0, len).getBytes(Constants.UTF8);
@@ -239,8 +242,6 @@ public class ValueLob extends Value {
                     break;
                 }
             }
-        } finally {
-            out.close();
         }
     }
 
@@ -421,9 +422,8 @@ public class ValueLob extends Value {
 
     private void createFromStream(byte[] buff, int len, InputStream in,
             long remaining, DataHandler h) throws IOException {
-        FileStoreOutputStream out = initLarge(h);
-        boolean compress = h.getLobCompressionAlgorithm(Value.BLOB) != null;
-        try {
+        try (FileStoreOutputStream out = initLarge(h)) {
+            boolean compress = h.getLobCompressionAlgorithm(Value.BLOB) != null;
             while (true) {
                 precision += len;
                 out.write(buff, 0, len);
@@ -437,8 +437,6 @@ public class ValueLob extends Value {
                     break;
                 }
             }
-        } finally {
-            out.close();
         }
     }
 
@@ -450,7 +448,7 @@ public class ValueLob extends Value {
      * @return the converted value
      */
     @Override
-    public Value convertTo(int t) {
+    public Value convertTo(int t, int precision, Mode mode, Column column) {
         if (t == type) {
             return this;
         } else if (t == Value.CLOB) {
@@ -460,7 +458,7 @@ public class ValueLob extends Value {
             ValueLob copy = ValueLob.createBlob(getInputStream(), -1, handler);
             return copy;
         }
-        return super.convertTo(t);
+        return super.convertTo(t, precision, mode, column);
     }
 
     @Override
@@ -730,7 +728,7 @@ public class ValueLob extends Value {
                 }
                 Value v2 = copy(h, tabId);
                 if (SysProperties.CHECK && v2 != this) {
-                    DbException.throwInternalError();
+                    DbException.throwInternalError(v2.toString());
                 }
             }
         } catch (IOException e) {

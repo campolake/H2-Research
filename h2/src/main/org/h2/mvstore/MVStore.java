@@ -18,7 +18,6 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-
 import org.h2.compress.CompressDeflate;
 import org.h2.compress.CompressLZF;
 import org.h2.compress.Compressor;
@@ -121,7 +120,7 @@ MVStore:
 /**
  * A persistent storage for maps.
  */
-public class MVStore {
+public final class MVStore {
 
     /**
      * Whether assertions are enabled.
@@ -293,12 +292,21 @@ public class MVStore {
         Object o = config.get("compress");
         this.compressionLevel = o == null ? 0 : (Integer) o;
         String fileName = (String) config.get("fileName");
-        o = config.get("pageSplitSize");
-        if (o == null) {
-            pageSplitSize = fileName == null ? 4 * 1024 : 16 * 1024;
-        } else {
-            pageSplitSize = (Integer) o;
+        fileStore = (FileStore) config.get("fileStore");
+        fileStoreIsProvided = fileStore != null;
+        if(fileStore == null && fileName != null) {
+            fileStore = new FileStore();
         }
+        o = config.get("pageSplitSize");
+        int pgSplitSize;
+        if (o != null) {
+            pgSplitSize = (Integer) o;
+        } else if(fileStore != null) {
+            pgSplitSize = 16 * 1024;
+        } else {
+            pgSplitSize = 48; // number of keys per page in that case
+        }
+        pageSplitSize = pgSplitSize;
         o = config.get("backgroundExceptionHandler");
         this.backgroundExceptionHandler = (UncaughtExceptionHandler) o;
         meta = new MVMap<String, String>(StringDataType.INSTANCE,
@@ -307,17 +315,10 @@ public class MVStore {
         c.put("id", 0);
         c.put("createVersion", currentVersion);
         meta.init(this, c);
-        fileStore = (FileStore) config.get("fileStore");
-        if (fileName == null && fileStore == null) {
+        if (fileStore == null) {
             cache = null;
             cacheChunkRef = null;
             return;
-        }
-        if (fileStore == null) {
-            fileStoreIsProvided = false;
-            fileStore = new FileStore();
-        } else {
-            fileStoreIsProvided = true;
         }
         retentionTime = fileStore.getDefaultRetentionTime();
         boolean readOnly = config.containsKey("readOnly");
@@ -326,6 +327,10 @@ public class MVStore {
         if (mb > 0) {
             CacheLongKeyLIRS.Config cc = new CacheLongKeyLIRS.Config();
             cc.maxMemory = mb * 1024L * 1024L;
+            o = config.get("cacheConcurrency");
+            if (o != null) {
+                cc.segmentCount = (Integer) o;
+            }
             cache = new CacheLongKeyLIRS<Page>(cc);
             cc.maxMemory /= 4;
             cacheChunkRef = new CacheLongKeyLIRS<PageChildren>(cc);
@@ -885,11 +890,8 @@ public class MVStore {
         // could result in a deadlock
         stopBackgroundThread();
         closed = true;
-        if (fileStore == null) {
-            return;
-        }
         synchronized (this) {
-            if (shrinkIfPossible) {
+            if (fileStore != null && shrinkIfPossible) {
                 shrinkFileIfPossible(0);
             }
             // release memory early - this is important when called
@@ -902,25 +904,16 @@ public class MVStore {
             meta = null;
             chunks.clear();
             maps.clear();
-            try {
-                if (!fileStoreIsProvided) {
-                    fileStore.close();
+            if (fileStore != null) {
+                try {
+                    if (!fileStoreIsProvided) {
+                        fileStore.close();
+                    }
+                } finally {
+                    fileStore = null;
                 }
-            } finally {
-                fileStore = null;
             }
         }
-    }
-
-    /**
-     * Whether the chunk at the given position is live.
-     *
-     * @param the chunk id
-     * @return true if it is live
-     */
-    boolean isChunkLive(int chunkId) {
-        String s = meta.get(Chunk.getMetaKey(chunkId));
-        return s != null;
     }
 
     /**
@@ -993,7 +986,7 @@ public class MVStore {
      *
      * @return the new version
      */
-    public long commit() {
+    public synchronized long commit() {
         if (fileStore != null) {
             return commitAndSave();
         }
@@ -1065,7 +1058,6 @@ public class MVStore {
         int currentUnsavedPageCount = unsavedMemory;
         long storeVersion = currentStoreVersion;
         long version = ++currentVersion;
-        setWriteVersion(version);
         lastCommitTime = time;
         retainChunk = null;
 
@@ -2525,9 +2517,14 @@ public class MVStore {
      * @param mb the cache size in MB.
      */
     public void setCacheSize(int mb) {
+        final long bytes = (long) mb * 1024 * 1024;
         if (cache != null) {
-            cache.setMaxMemory((long) mb * 1024 * 1024);
+            cache.setMaxMemory(bytes);
             cache.clear();
+        }
+        if (cacheChunkRef != null) {
+            cacheChunkRef.setMaxMemory(bytes / 4);
+            cacheChunkRef.clear();
         }
     }
 
@@ -2637,6 +2634,8 @@ public class MVStore {
 
     /**
      * Get the amount of memory used for caching, in MB.
+     * Note that this does not include the page chunk references cache, which is
+     * 25% of the size of the page cache.
      *
      * @return the amount of memory used for caching
      */
@@ -2649,6 +2648,8 @@ public class MVStore {
 
     /**
      * Get the maximum cache size, in MB.
+     * Note that this does not include the page chunk references cache, which is
+     * 25% of the size of the page cache.
      *
      * @return the cache size
      */
@@ -2826,6 +2827,17 @@ public class MVStore {
          */
         public Builder cacheSize(int mb) {
             return set("cacheSize", mb);
+        }
+
+        /**
+         * Set the read cache concurrency. The default is 16, meaning 16
+         * segments are used.
+         *
+         * @param concurrency the cache concurrency
+         * @return this
+         */
+        public Builder cacheConcurrency(int concurrency) {
+            return set("cacheConcurrency", concurrency);
         }
 
         /**

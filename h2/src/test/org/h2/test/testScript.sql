@@ -2126,6 +2126,12 @@ select x from dual where REGEXP_LIKE('A', '[a-z]', 'c');
 > -
 > rows: 0
 
+select regexp_replace('Sylvain', 'S..', 'TOTO', 'mni') as X;
+> X
+> --------
+> TOTOvain
+> rows: 1
+
 SELECT 'Hello' ~ 'He.*' T1, 'HELLO' ~ 'He.*' F2, CAST('HELLO' AS VARCHAR_IGNORECASE) ~ 'He.*' T3;
 > T1   F2    T3
 > ---- ----- ----
@@ -3048,6 +3054,13 @@ select min(8=bitand(12, PARSE_INT2(SUBSTRING(random_uuid(), 20,1), 16))) from sy
 > ---------------------------------------------------------------------------
 > TRUE
 > rows: 1
+
+select BITGET(x, 0) AS IS_SET from system_range(1, 2);
+> IS_SET
+> ------
+> FALSE
+> TRUE
+> rows: 2
 
 drop alias PARSE_INT2;
 > ok
@@ -4902,6 +4915,22 @@ SELECT group_concat(name) FROM TEST group by id;
 drop table test;
 > ok
 
+create table test(a int primary key, b int invisible, c int);
+> ok
+
+select * from test;
+> A C
+> - -
+> rows: 0
+
+select a, b, c from test;
+> A B C
+> - - -
+> rows: 0
+
+drop table test;
+> ok
+
 --- script drop ---------------------------------------------------------------------------------------------
 create memory table test (id int primary key, im_ie varchar(10));
 > ok
@@ -6170,6 +6199,49 @@ SELECT * FROM TEST;
 DROP TABLE TEST;
 > ok
 
+create table test(id int, name varchar invisible);
+> ok
+
+select * from test;
+> ID
+> --
+> rows: 0
+
+alter table test alter column name set visible;
+> ok
+
+select * from test;
+> ID NAME
+> -- ----
+> rows: 0
+
+alter table test add modify_date timestamp invisible before name;
+> ok
+
+select * from test;
+> ID NAME
+> -- ----
+> rows: 0
+
+alter table test alter column modify_date timestamp visible;
+> ok
+
+select * from test;
+> ID MODIFY_DATE NAME
+> -- ----------- ----
+> rows: 0
+
+alter table test alter column modify_date set invisible;
+> ok
+
+select * from test;
+> ID NAME
+> -- ----
+> rows: 0
+
+drop table test;
+> ok
+
 --- autoIncrement ----------------------------------------------------------------------------------------------
 CREATE MEMORY TABLE TEST(ID INT PRIMARY KEY, NAME VARCHAR);
 > ok
@@ -7365,6 +7437,17 @@ SELECT * FROM TEST WHERE NAME LIKE 'Hello%';
 > 1  Hello
 > rows: 1
 
+SELECT * FROM TEST WHERE NAME ILIKE 'hello%';
+> ID NAME
+> -- -----
+> 1  Hello
+> rows: 1
+
+SELECT * FROM TEST WHERE NAME ILIKE 'xxx%';
+> ID NAME
+> -- ----
+> rows: 0
+
 SELECT * FROM TEST WHERE NAME LIKE 'Wo%';
 > ID NAME
 > -- -----
@@ -8148,9 +8231,9 @@ select * from s;
 > rows: 1
 
 select some(y>10), every(y>10), min(y), max(y) from t;
-> BOOL_OR(Y > 10) BOOL_AND(Y > 10) MIN(Y) MAX(Y)
-> --------------- ---------------- ------ ------
-> null            null             null   null
+> BOOL_OR(Y > 10.0) BOOL_AND(Y > 10.0) MIN(Y) MAX(Y)
+> ----------------- ------------------ ------ ------
+> null              null               null   null
 > rows: 1
 
 insert into t values(1000000004, 4);
@@ -8206,9 +8289,9 @@ stddev_pop(distinct y) s_py, stddev_samp(distinct y) s_sy, var_pop(distinct y) v
 > rows: 1
 
 select some(y>10), every(y>10), min(y), max(y) from t;
-> BOOL_OR(Y > 10) BOOL_AND(Y > 10) MIN(Y) MAX(Y)
-> --------------- ---------------- ------ ------
-> TRUE            FALSE            4.0    16.0
+> BOOL_OR(Y > 10.0) BOOL_AND(Y > 10.0) MIN(Y) MAX(Y)
+> ----------------- ------------------ ------ ------
+> TRUE              FALSE              4.0    16.0
 > rows: 1
 
 drop view s;
@@ -10225,6 +10308,9 @@ create table test(id int, name varchar);
 insert into test values(5, 'b'), (5, 'b'), (20, 'a');
 > update count: 3
 
+drop table test;
+> ok
+
 select 0 from ((
     select 0 as f from dual u1 where null in (?, ?, ?, ?, ?)
 ) union all (
@@ -10505,4 +10591,173 @@ create table z.z (id int);
 > ok
 
 drop schema z;
+> ok
+
+----------------
+--- ENUM support
+----------------
+
+--- ENUM basic operations
+
+create table card (rank int, suit enum('hearts', 'clubs', 'spades'));
+> ok
+
+insert into card (rank, suit) values (0, 'clubs'), (3, 'hearts');
+> update count: 2
+
+alter table card alter column suit enum('hearts', 'clubs', 'spades', 'diamonds');
+> ok
+
+select * from card;
+> RANK SUIT
+> ---- ------
+> 0    clubs
+> 3    hearts
+
+select * from card order by suit;
+> RANK SUIT
+> ---- ------
+> 3    hearts
+> 0    clubs
+
+insert into card (rank, suit) values (8, 'diamonds'), (10, 'clubs'), (7, 'hearts');
+> update count: 3
+
+select suit, count(rank) from card group by suit order by suit, count(rank);
+> SUIT     COUNT(RANK)
+> -------- -----------
+> hearts   2
+> clubs    2
+> diamonds 1
+
+select rank from card where suit = 'diamonds';
+> RANK
+> ----
+> 8
+
+--- ENUM integer-based operations
+
+select rank from card where suit = 1;
+> RANK
+> ----
+> 0
+> 10
+
+insert into card (rank, suit) values(5, 2);
+> update count: 1
+
+select * from card where rank = 5;
+> RANK SUIT
+> ---- ------
+> 5    spades
+
+--- ENUM edge cases
+
+insert into card (rank, suit) values(6, ' ');
+> exception
+
+alter table card alter column suit enum('hearts', 'clubs', 'spades', 'diamonds', 'clubs');
+> exception
+
+alter table card alter column suit enum('hearts', 'clubs', 'spades', 'diamonds', '');
+> exception
+
+drop table card;
+> ok
+
+--- ENUM as custom user data type
+
+create type CARD_SUIT as enum('hearts', 'clubs', 'spades', 'diamonds');
+> ok
+
+create table card (rank int, suit CARD_SUIT);
+> ok
+
+insert into card (rank, suit) values (0, 'clubs'), (3, 'hearts');
+> update count: 2
+
+select * from card;
+> RANK SUIT
+> ---- ------
+> 0    clubs
+> 3    hearts
+
+drop table card;
+> ok
+
+drop type CARD_SUIT;
+> ok
+
+--- ENUM in primary key with another column
+create type CARD_SUIT as enum('hearts', 'clubs', 'spades', 'diamonds');
+> ok
+
+create table card (rank int, suit CARD_SUIT, primary key(rank, suit));
+> ok
+
+insert into card (rank, suit) values (0, 'clubs'), (3, 'hearts'), (1, 'clubs');
+> update count: 3
+
+insert into card (rank, suit) values (0, 'clubs');
+> exception
+
+select rank from card where suit = 'clubs';
+> RANK
+> ----
+> 0
+> 1
+
+drop table card;
+> ok
+
+drop type CARD_SUIT;
+> ok
+
+--- ENUM with index
+create type CARD_SUIT as enum('hearts', 'clubs', 'spades', 'diamonds');
+> ok
+
+create table card (rank int, suit CARD_SUIT, primary key(rank, suit));
+> ok
+
+insert into card (rank, suit) values (0, 'clubs'), (3, 'hearts'), (1, 'clubs');
+> update count: 3
+
+create index idx_card_suite on card(`suit`);
+
+select rank from card where suit = 'clubs';
+> RANK
+> ----
+> 0
+> 1
+
+select rank from card where suit in ('clubs');
+> RANK
+> ----
+> 0
+> 1
+
+drop table card;
+> ok
+
+drop type CARD_SUIT;
+> ok
+
+----- Issue#493 -----
+create table test (year int, action varchar(10));
+> ok
+
+insert into test values (2015, 'order'), (2016, 'order'), (2014, 'order');
+> update count: 3
+
+insert into test values (2014, 'execution'), (2015, 'execution'), (2016, 'execution');
+> update count: 3
+
+select * from test where year in (select distinct year from test order by year desc limit 1 offset 0);
+> YEAR ACTION
+> ---- ---------
+> 2016 order
+> 2016 execution
+
+drop table test;
 > ok

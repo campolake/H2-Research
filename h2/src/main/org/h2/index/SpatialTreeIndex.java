@@ -180,13 +180,12 @@ public class SpatialTreeIndex extends BaseIndex implements SpatialIndex {
     /**
      * Compute spatial index cost
      * @param masks Search mask
-     * @param rowCount Table row count
      * @param columns Table columns
      * @return Index cost hint
      */
-    public static long getCostRangeIndex(int[] masks, long rowCount, Column[] columns) {
+    public static long getCostRangeIndex(int[] masks, Column[] columns) {
         // Never use spatial tree index without spatial filter
-        if(columns.length == 0) {
+        if (columns.length == 0) {
             return Long.MAX_VALUE;
         }
         for (Column column : columns) {
@@ -203,7 +202,7 @@ public class SpatialTreeIndex extends BaseIndex implements SpatialIndex {
     public double getCost(Session session, int[] masks,
             TableFilter[] filters, int filter, SortOrder sortOrder,
             HashSet<Column> allColumnsSet) {
-        return getCostRangeIndex(masks, table.getRowCountApproximation(), columns);
+        return getCostRangeIndex(masks, columns);
     }
 
 
@@ -237,7 +236,7 @@ public class SpatialTreeIndex extends BaseIndex implements SpatialIndex {
     @Override
     public Cursor findFirstOrLast(Session session, boolean first) {
         if (closed) {
-            throw DbException.throwInternalError();
+            throw DbException.throwInternalError(toString());
         }
         if (!first) {
             throw DbException.throwInternalError(

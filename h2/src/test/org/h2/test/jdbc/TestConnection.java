@@ -6,7 +6,6 @@
 package org.h2.test.jdbc;
 
 import org.h2.api.ErrorCode;
-import org.h2.jdbc.JdbcConnectionBackwardsCompat;
 import org.h2.test.TestBase;
 import java.sql.Connection;
 import java.sql.SQLClientInfoException;
@@ -46,6 +45,7 @@ public class TestConnection extends TestBase {
 
         assertThrows(SQLClientInfoException.class, conn).setClientInfo("numServers", "SomeValue");
         assertThrows(SQLClientInfoException.class, conn).setClientInfo("server23", "SomeValue");
+        conn.close();
     }
 
     private void testSetUnsupportedClientInfoProperties() throws SQLException {
@@ -55,6 +55,7 @@ public class TestConnection extends TestBase {
         properties.put("ClientUser", "someUser");
 
         assertThrows(SQLClientInfoException.class, conn).setClientInfo(properties);
+        conn.close();
     }
 
     private void testSetSupportedClientInfoProperties() throws SQLException {
@@ -68,6 +69,7 @@ public class TestConnection extends TestBase {
         assertNull(conn.getClientInfo("ApplicationName"));
         // new property has been set
         assertEquals(conn.getClientInfo("ClientUser"), "someUser");
+        conn.close();
     }
 
     private void testSetSupportedClientInfo() throws SQLException {
@@ -75,17 +77,20 @@ public class TestConnection extends TestBase {
         conn.setClientInfo("ApplicationName", "Connection Test");
 
         assertEquals(conn.getClientInfo("ApplicationName"), "Connection Test");
+        conn.close();
     }
 
     private void testSetUnsupportedClientInfo() throws SQLException {
         Connection conn = getConnection("clientInfoDB2;MODE=DB2");
         assertThrows(SQLClientInfoException.class, conn).setClientInfo(
                 "UnsupportedName", "SomeValue");
+        conn.close();
     }
 
     private void testGetUnsupportedClientInfo() throws SQLException {
         Connection conn = getConnection("clientInfo");
         assertNull(conn.getClientInfo("UnknownProperty"));
+        conn.close();
     }
 
     private void testSetGetSchema() throws SQLException {
@@ -97,18 +102,17 @@ public class TestConnection extends TestBase {
         Statement s = conn.createStatement();
         s.executeUpdate("create schema my_test_schema");
         s.executeUpdate("create table my_test_schema.my_test_table(id uuid, nave varchar)");
-        JdbcConnectionBackwardsCompat connx = (JdbcConnectionBackwardsCompat) conn;
-        assertEquals("PUBLIC", connx.getSchema());
+        assertEquals("PUBLIC", conn.getSchema());
         assertThrows(ErrorCode.TABLE_OR_VIEW_NOT_FOUND_1, s, "select * from my_test_table");
-        assertThrows(ErrorCode.SCHEMA_NOT_FOUND_1, connx).setSchema("my_test_table");
-        connx.setSchema("MY_TEST_SCHEMA");
-        assertEquals("MY_TEST_SCHEMA", connx.getSchema());
+        assertThrows(ErrorCode.SCHEMA_NOT_FOUND_1, conn).setSchema("my_test_table");
+        conn.setSchema("MY_TEST_SCHEMA");
+        assertEquals("MY_TEST_SCHEMA", conn.getSchema());
         s.executeQuery("select * from my_test_table");
-        assertThrows(ErrorCode.SCHEMA_NOT_FOUND_1, connx).setSchema("NON_EXISTING_SCHEMA");
-        assertEquals("MY_TEST_SCHEMA", connx.getSchema());
+        assertThrows(ErrorCode.SCHEMA_NOT_FOUND_1, conn).setSchema("NON_EXISTING_SCHEMA");
+        assertEquals("MY_TEST_SCHEMA", conn.getSchema());
         s.executeUpdate("create schema \"otheR_schEma\"");
-        connx.setSchema("otheR_schEma");
-        assertEquals("otheR_schEma", connx.getSchema());
+        conn.setSchema("otheR_schEma");
+        assertEquals("otheR_schEma", conn.getSchema());
         s.close();
         conn.close();
     }
