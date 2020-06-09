@@ -3458,14 +3458,14 @@ public class Parser {
         case CHAR_NAME:
             while (true) {
                 type = types[i];
-                if (type != CHAR_NAME && type != CHAR_VALUE) {
+                if (type != CHAR_NAME && type != CHAR_VALUE) {//如果是字符就一直执行，直到不是字符，退出
                     break;
                 }
                 i++;
             }
             currentToken = StringUtils.cache(sqlCommand.substring(
-                    start, i));
-            currentTokenType = getTokenType(currentToken);
+                    start, i));//将开始位置到结束位置之间的字符转化为token
+            currentTokenType = getTokenType(currentToken);//识别token的type
             parseIndex = i;
             return;
         case CHAR_QUOTED: {
