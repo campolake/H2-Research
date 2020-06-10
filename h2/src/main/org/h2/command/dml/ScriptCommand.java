@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
@@ -11,19 +11,19 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.Collection;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.Set;
 import org.h2.api.ErrorCode;
 import org.h2.command.CommandInterface;
-import org.h2.command.Parser;
 import org.h2.constraint.Constraint;
+import org.h2.constraint.Constraint.Type;
 import org.h2.engine.Comment;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
@@ -35,7 +35,6 @@ import org.h2.engine.Setting;
 import org.h2.engine.SysProperties;
 import org.h2.engine.User;
 import org.h2.engine.UserAggregate;
-import org.h2.engine.UserDataType;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionColumn;
 import org.h2.index.Cursor;
@@ -45,6 +44,7 @@ import org.h2.result.LocalResult;
 import org.h2.result.ResultInterface;
 import org.h2.result.Row;
 import org.h2.schema.Constant;
+import org.h2.schema.Domain;
 import org.h2.schema.Schema;
 import org.h2.schema.SchemaObject;
 import org.h2.schema.Sequence;
@@ -55,7 +55,6 @@ import org.h2.table.Table;
 import org.h2.table.TableType;
 import org.h2.util.IOUtils;
 import org.h2.util.MathUtils;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 import org.h2.util.Utils;
 import org.h2.value.Value;
@@ -67,7 +66,7 @@ import org.h2.value.ValueString;
  */
 public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此命令返回结果集，所以要用executeQuery，与RUNSCRIPT相反
 
-    private Charset charset = Constants.UTF8;
+    private Charset charset = StandardCharsets.UTF_8;
     private Set<String> schemaNames;
     private Collection<Table> tables;
     private boolean passwords;
@@ -79,6 +78,7 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
     // true if we're generating the DROP statements
     private boolean drop;
     private boolean simple;
+    private boolean withColumns;
     private LocalResult result;
     private String lineSeparatorString;
     private byte[] lineSeparator;
@@ -134,9 +134,8 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
     }
 
     private LocalResult createResult() {
-        Expression[] expressions = { new ExpressionColumn(
-                session.getDatabase(), new Column("SCRIPT", Value.STRING)) };
-        return new LocalResult(session, expressions, 1);
+        return new LocalResult(session, new Expression[] {
+                new ExpressionColumn(session.getDatabase(), new Column("SCRIPT", Value.VARCHAR)) }, 1, 1);
     }
 
     @Override
@@ -186,11 +185,12 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
                 }
                 add(schema.getCreateSQL(), false);
             }
-            for (UserDataType datatype : db.getAllUserDataTypes()) {
+            for (SchemaObject obj : db.getAllSchemaObjects(DbObject.DOMAIN)) {
+                Domain domain = (Domain) obj;
                 if (drop) {
-                    add(datatype.getDropSQL(), false);
+                    add(domain.getDropSQL(), false);
                 }
-                add(datatype.getCreateSQL(), false);
+                add(domain.getCreateSQL(), false);
             }
             for (SchemaObject obj : db.getAllSchemaObjects(
                     DbObject.CONSTANT)) {
@@ -204,12 +204,7 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
             final ArrayList<Table> tables = db.getAllTablesAndViews(false);
             // sort by id, so that views are after tables and views on views
             // after the base views
-            Collections.sort(tables, new Comparator<Table>() {
-                @Override
-                public int compare(Table t1, Table t2) {
-                    return t1.getId() - t2.getId();
-                }
-            });
+            tables.sort(Comparator.comparingInt(Table::getId));
 
             // Generate the DROP XXX  ... IF EXISTS
             for (Table table : tables) {
@@ -257,7 +252,15 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
                 if (drop) {
                     add(sequence.getDropSQL(), false);
                 }
-                add(sequence.getCreateSQL(), false);
+                String createSQL, alterSQL;
+                synchronized (sequence) {
+                    createSQL = sequence.getCreateSQL(true, false);
+                    alterSQL = sequence.getCreateSQL(true, true);
+                }
+                add(createSQL, false);
+                if (alterSQL != null) {
+                    add(alterSQL, false);
+                }
             }
 
             // Generate CREATE TABLE and INSERT...VALUES
@@ -283,18 +286,17 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
                 final ArrayList<Constraint> constraints = table.getConstraints();
                 if (constraints != null) {
                     for (Constraint constraint : constraints) {
-                        if (Constraint.PRIMARY_KEY.equals(
-                                constraint.getConstraintType())) {
+                        if (Constraint.Type.PRIMARY_KEY == constraint.getConstraintType()) {
                             add(constraint.getCreateSQLWithoutIndexes(), false);
                         }
                     }
                 }
                 if (TableType.TABLE == tableType) {
                     if (table.canGetRowCount()) {
-                        String rowcount = "-- " +
-                                table.getRowCountApproximation() +
-                                " +/- SELECT COUNT(*) FROM " + table.getSQL();
-                        add(rowcount, false);
+                        StringBuilder builder = new StringBuilder("-- ").append(table.getRowCountApproximation())
+                                .append(" +/- SELECT COUNT(*) FROM ");
+                        table.getSQL(builder, false);
+                        add(builder.toString(), false);
                     }
                     if (data) {
                         count = generateInsertValues(count, table);
@@ -316,14 +318,8 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
                 tempLobTableCreated = false;
             }
             // Generate CREATE CONSTRAINT ...
-            final ArrayList<SchemaObject> constraints = db.getAllSchemaObjects(
-                    DbObject.CONSTRAINT);
-            Collections.sort(constraints, new Comparator<SchemaObject>() {
-                @Override
-                public int compare(SchemaObject c1, SchemaObject c2) {
-                    return ((Constraint) c1).compareTo((Constraint) c2);
-                }
-            });
+            final ArrayList<SchemaObject> constraints = db.getAllSchemaObjects(DbObject.CONSTRAINT);
+            constraints.sort(null);
             for (SchemaObject obj : constraints) {
                 if (excludeSchema(obj.getSchema())) {
                     continue;
@@ -332,10 +328,11 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
                 if (excludeTable(constraint.getTable())) {
                     continue;
                 }
-                if (constraint.getTable().isHidden()) {
+                Type constraintType = constraint.getConstraintType();
+                if (constraintType != Type.DOMAIN && constraint.getTable().isHidden()) {
                     continue;
                 }
-                if (!Constraint.PRIMARY_KEY.equals(constraint.getConstraintType())) {
+                if (constraintType != Constraint.Type.PRIMARY_KEY) {
                     add(constraint.getCreateSQLWithoutIndexes(), false);
                 }
             }
@@ -393,58 +390,59 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
         Index index = plan.getIndex();
         Cursor cursor = index.find(session, null, null);
         Column[] columns = table.getColumns();
-        StatementBuilder buff = new StatementBuilder("INSERT INTO ");
-        buff.append(table.getSQL()).append('(');
-        for (Column col : columns) {
-            buff.appendExceptFirst(", ");
-            buff.append(Parser.quoteIdentifier(col.getName()));
+        StringBuilder builder = new StringBuilder("INSERT INTO ");
+        table.getSQL(builder, true);
+        if (withColumns) {
+            builder.append('(');
+            Column.writeColumns(builder, columns, true);
+            builder.append(')');
         }
-        buff.append(") VALUES");
+        builder.append(" VALUES");
         if (!simple) {
-            buff.append('\n');
+            builder.append('\n');
         }
-        buff.append('(');
-        String ins = buff.toString();
-        buff = null;
+        builder.append('(');
+        String ins = builder.toString();
+        builder = null;
         while (cursor.next()) {
             Row row = cursor.get();
-            if (buff == null) {
-                buff = new StatementBuilder(ins);
+            if (builder == null) {
+                builder = new StringBuilder(ins);
             } else {
-                buff.append(",\n(");
+                builder.append(",\n(");
             }
             for (int j = 0; j < row.getColumnCount(); j++) {
                 if (j > 0) {
-                    buff.append(", ");
+                    builder.append(", ");
                 }
                 Value v = row.getValue(j);
-                if (v.getPrecision() > lobBlockSize) {
+                if (v.getType().getPrecision() > lobBlockSize) {
                     int id;
-                    if (v.getType() == Value.CLOB) {
+                    if (v.getValueType() == Value.CLOB) {
                         id = writeLobStream(v);
-                        buff.append("SYSTEM_COMBINE_CLOB(" + id + ")");
-                    } else if (v.getType() == Value.BLOB) {
+                        builder.append("SYSTEM_COMBINE_CLOB(").append(id).append(')');
+                    } else if (v.getValueType() == Value.BLOB) {
                         id = writeLobStream(v);
-                        buff.append("SYSTEM_COMBINE_BLOB(" + id + ")");
+                        builder.append("SYSTEM_COMBINE_BLOB(").append(id).append(')');
                     } else {
-                        buff.append(v.getSQL());
+                        v.getSQL(builder);
                     }
                 } else {
-                    buff.append(v.getSQL());
+                    v.getSQL(builder);
                 }
             }
-            buff.append(')');
+            builder.append(')');
             count++;
             if ((count & 127) == 0) {
                 checkCanceled();
             }
-            if (simple || buff.length() > Constants.IO_BUFFER_SIZE) {
-                add(buff.toString(), true);
-                buff = null;
+            if (simple || builder.length() > Constants.IO_BUFFER_SIZE) {
+                add(builder.toString(), true);
+                builder = null;
             }
         }
-        if (buff != null) {
-            add(buff.toString(), true);
+        if (builder != null) {
+            add(builder.toString(), true);
         }
         return count;
     }
@@ -464,19 +462,19 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
             tempLobTableCreated = true;
         }
         int id = nextLobId++;
-        switch (v.getType()) {
+        switch (v.getValueType()) {
         case Value.BLOB: {
             byte[] bytes = new byte[lobBlockSize];
             try (InputStream input = v.getInputStream()) {
                 for (int i = 0;; i++) {
                     StringBuilder buff = new StringBuilder(lobBlockSize * 2);
-                    buff.append("INSERT INTO SYSTEM_LOB_STREAM VALUES(" + id +
-                            ", " + i + ", NULL, '");
+                    buff.append("INSERT INTO SYSTEM_LOB_STREAM VALUES(").append(id)
+                            .append(", ").append(i).append(", NULL, '");
                     int len = IOUtils.readFully(input, bytes, lobBlockSize);
                     if (len <= 0) {
                         break;
                     }
-                    buff.append(StringUtils.convertBytesToHex(bytes, len)).append("')");
+                    StringUtils.convertBytesToHex(buff, bytes, len).append("')");
                     String sql = buff.toString();
                     add(sql, true);
                 }
@@ -489,12 +487,13 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
             try (Reader reader = v.getReader()) {
                 for (int i = 0;; i++) {
                     StringBuilder buff = new StringBuilder(lobBlockSize * 2);
-                    buff.append("INSERT INTO SYSTEM_LOB_STREAM VALUES(" + id + ", " + i + ", ");
+                    buff.append("INSERT INTO SYSTEM_LOB_STREAM VALUES(").append(id).append(", ").append(i)
+                            .append(", ");
                     int len = IOUtils.readFully(reader, chars, lobBlockSize);
                     if (len == 0) {
                         break;
                     }
-                    buff.append(StringUtils.quoteStringSQL(new String(chars, 0, len))).
+                    StringUtils.quoteStringSQL(buff, new String(chars, 0, len)).
                         append(", NULL)");
                     String sql = buff.toString();
                     add(sql, true);
@@ -503,7 +502,7 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
             break;
         }
         default:
-            DbException.throwInternalError("type:" + v.getType());
+            DbException.throwInternalError("type:" + v.getValueType());
         }
         return id;
     }
@@ -703,17 +702,19 @@ public class ScriptCommand extends ScriptBase { //生成各种Create SQL，此�
             }
             out.write(buffer, 0, len);
             if (!insert) {
-                Value[] row = { ValueString.get(s) };
-                result.addRow(row);
+                result.addRow(ValueString.get(s));
             }
         } else {
-            Value[] row = { ValueString.get(s) };
-            result.addRow(row);
+            result.addRow(ValueString.get(s));
         }
     }
 
     public void setSimple(boolean simple) {
         this.simple = simple;
+    }
+
+    public void setWithColumns(boolean withColumns) {
+        this.withColumns = withColumns;
     }
 
     public void setCharset(Charset charset) {

@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
@@ -22,15 +22,15 @@ import java.util.concurrent.TimeUnit;
 
 import org.h2.fulltext.FullText;
 import org.h2.store.fs.FileUtils;
-import org.h2.test.TestAll;
 import org.h2.test.TestBase;
+import org.h2.test.TestDb;
 import org.h2.util.IOUtils;
 import org.h2.util.Task;
 
 /**
  * Fulltext search tests.
  */
-public class TestFullText extends TestBase {
+public class TestFullText extends TestDb {
 
     /**
      * The words used in this test.
@@ -68,19 +68,14 @@ public class TestFullText extends TestBase {
                 testCreateDropLucene();
                 testUuidPrimaryKey(true);
                 testMultiThreaded(true);
-                if(config.mvStore || !config.multiThreaded) {
-                    testMultiThreaded(false);
-                }
+                testMultiThreaded(false);
                 testTransaction(true);
                 test(true, "VARCHAR");
                 test(true, "CLOB");
                 testPerformance(true);
                 testReopen(true);
                 testDropIndex(true);
-            } catch (ClassNotFoundException e) {
-                println("Class not found, not tested: " + LUCENE_FULLTEXT_CLASS_NAME);
-                // ok
-            } catch (NoClassDefFoundError e) {
+            } catch (ClassNotFoundException | NoClassDefFoundError e) {
                 println("Class not found, not tested: " + LUCENE_FULLTEXT_CLASS_NAME);
                 // ok
             }
@@ -108,7 +103,7 @@ public class TestFullText extends TestBase {
         Connection conn;
         Statement stat;
 
-        ArrayList<Connection> connList = new ArrayList<Connection>();
+        ArrayList<Connection> connList = new ArrayList<>();
 
         conn = getConnection("fullTextNative", connList);
         stat = conn.createStatement();
@@ -130,7 +125,7 @@ public class TestFullText extends TestBase {
 
     private void testNativeFeatures() throws SQLException {
         deleteDb("fullTextNative");
-        ArrayList<Connection> connList = new ArrayList<Connection>();
+        ArrayList<Connection> connList = new ArrayList<>();
         Connection conn = getConnection("fullTextNative", connList);
         Statement stat = conn.createStatement();
         stat.execute("CREATE ALIAS IF NOT EXISTS FT_INIT " +
@@ -160,8 +155,8 @@ public class TestFullText extends TestBase {
         assertEquals("KEYS", rs.getMetaData().getColumnLabel(4));
         assertEquals("PUBLIC", rs.getString(1));
         assertEquals("TEST", rs.getString(2));
-        assertEquals("(ID)", rs.getString(3));
-        assertEquals("(1)", rs.getString(4));
+        assertEquals("[ID]", rs.getString(3));
+        assertEquals("[1]", rs.getString(4));
 
         rs = stat.executeQuery("SELECT * FROM FT_SEARCH('this', 0, 0)");
         assertFalse(rs.next());
@@ -214,7 +209,7 @@ public class TestFullText extends TestBase {
         String prefix = lucene ? "FTL" : "FT";
         deleteDb("fullTextTransaction");
         FileUtils.deleteRecursive(getBaseDir() + "/fullTextTransaction", false);
-        ArrayList<Connection> connList = new ArrayList<Connection>();
+        ArrayList<Connection> connList = new ArrayList<>();
         Connection conn = getConnection("fullTextTransaction", connList);
         Statement stat = conn.createStatement();
         initFullText(stat, lucene);
@@ -250,7 +245,7 @@ public class TestFullText extends TestBase {
         final String prefix = lucene ? "FTL" : "FT";
         trace("Testing multithreaded " + prefix);
         deleteDb("fullText");
-        ArrayList<Connection> connList = new ArrayList<Connection>();
+        ArrayList<Connection> connList = new ArrayList<>();
         try {
             int len = 2;
             Task[] task = new Task[len];

@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.dev.fs;
@@ -12,17 +12,15 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
-import java.util.Comparator;
 import java.util.Map.Entry;
-import java.util.concurrent.TimeUnit;
 import java.util.Random;
+import java.util.concurrent.TimeUnit;
+
 import org.h2.mvstore.Cursor;
 import org.h2.mvstore.DataUtils;
 import org.h2.mvstore.MVMap;
 import org.h2.mvstore.MVStore;
 import org.h2.store.fs.FileUtils;
-import org.h2.util.New;
 
 /**
  * An archive tool to compress directories, using the MVStore backend.
@@ -68,7 +66,7 @@ public class ArchiveToolStore {
         start();
         long tempSize = 8 * 1024 * 1024;
         String tempFileName = fileName + ".temp";
-        ArrayList<String> fileNames = New.arrayList();
+        ArrayList<String> fileNames = new ArrayList<>();
 
         System.out.println("Reading the file list");
         long totalSize = addFiles(sourceDir, fileNames);
@@ -100,9 +98,8 @@ public class ArchiveToolStore {
             }
             buff.clear();
             buff.flip();
-            ArrayList<Integer> posList = new ArrayList<Integer>();
-            FileChannel fc = FileUtils.open(s, "r");
-            try {
+            ArrayList<Integer> posList = new ArrayList<>();
+            try (FileChannel fc = FileUtils.open(s, "r")) {
                 boolean eof = false;
                 while (true) {
                     while (!eof && buff.remaining() < 512 * 1024) {
@@ -118,11 +115,11 @@ public class ArchiveToolStore {
                     if (buff.remaining() == 0) {
                         break;
                     }
-                    int c = getChunkLength(buff.array(), buff.position(),
-                            buff.limit()) - buff.position();
-                    byte[] bytes = new byte[c];
-                    System.arraycopy(buff.array(), buff.position(), bytes, 0, c);
-                    buff.position(buff.position() + c);
+                    int position = buff.position();
+                    int c = getChunkLength(buff.array(), position,
+                            buff.limit()) - position;
+                    byte[] bytes = Arrays.copyOfRange(buff.array(), position, position + c);
+                    buff.position(position + c);
                     int[] key = getKey(bucket, bytes);
                     key[3] = segmentId;
                     while (true) {
@@ -153,8 +150,6 @@ public class ArchiveToolStore {
                     }
                     printProgress(0, 50, currentSize, totalSize);
                 }
-            } finally {
-                fc.close();
             }
             int[] posArray = new int[posList.size()];
             for (int i = 0; i < posList.size(); i++) {
@@ -163,7 +158,7 @@ public class ArchiveToolStore {
             filesTemp.put(name, posArray);
         }
         storeTemp.commit();
-        ArrayList<Cursor<int[], byte[]>> list = New.arrayList();
+        ArrayList<Cursor<int[], byte[]>> list = new ArrayList<>(segmentId-1);
         totalSize = 0;
         for (int i = 1; i <= segmentId; i++) {
             MVMap<int[], byte[]> data = storeTemp.openMap("data" + i);
@@ -180,28 +175,22 @@ public class ArchiveToolStore {
         MVMap<int[], byte[]> data = store.openMap("data" + segmentId);
         MVMap<int[], Boolean> keepSegment = storeTemp.openMap("keep");
         while (list.size() > 0) {
-            Collections.sort(list, new Comparator<Cursor<int[], byte[]>>() {
-
-                @Override
-                public int compare(Cursor<int[], byte[]> o1,
-                        Cursor<int[], byte[]> o2) {
-                    int[] k1 = o1.getKey();
-                    int[] k2 = o2.getKey();
-                    int comp = 0;
-                    for (int i = 0; i < k1.length - 1; i++) {
-                        long x1 = k1[i];
-                        long x2 = k2[i];
-                        if (x1 > x2) {
-                            comp = 1;
-                            break;
-                        } else if (x1 < x2) {
-                            comp = -1;
-                            break;
-                        }
-                    }
-                    return comp;
+            list.sort((o1, o2) -> {
+                int[] k1 = o1.getKey();
+                int[] k2 = o2.getKey();
+                int comp = 0;
+                for (int i = 0; i < k1.length - 1; i++) {
+                long x1 = k1[i];
+                long x2 = k2[i];
+                if (x1 > x2) {
+                    comp = 1;
+                    break;
+                } else if (x1 < x2) {
+                    comp = -1;
+                    break;
                 }
-
+                }
+                return comp;
             });
             Cursor<int[], byte[]> top = list.get(0);
             int[] key = top.getKey();
@@ -382,7 +371,7 @@ public class ArchiveToolStore {
             storeTemp.commit();
         }
 
-        ArrayList<Cursor<int[], byte[]>> list = New.arrayList();
+        ArrayList<Cursor<int[], byte[]>> list = new ArrayList<>(lastSegment-1);
         totalSize = 0;
         currentSize = 0;
         for (int i = 1; i <= lastSegment; i++) {
@@ -398,28 +387,22 @@ public class ArchiveToolStore {
         OutputStream file = null;
         int[] lastKey = null;
         while (list.size() > 0) {
-            Collections.sort(list, new Comparator<Cursor<int[], byte[]>>() {
-
-                @Override
-                public int compare(Cursor<int[], byte[]> o1,
-                        Cursor<int[], byte[]> o2) {
-                    int[] k1 = o1.getKey();
-                    int[] k2 = o2.getKey();
-                    int comp = 0;
-                    for (int i = 0; i < k1.length; i++) {
-                        long x1 = k1[i];
-                        long x2 = k2[i];
-                        if (x1 > x2) {
-                            comp = 1;
-                            break;
-                        } else if (x1 < x2) {
-                            comp = -1;
-                            break;
-                        }
+            list.sort((o1, o2) -> {
+                int[] k1 = o1.getKey();
+                int[] k2 = o2.getKey();
+                int comp = 0;
+                for (int i = 0; i < k1.length; i++) {
+                    long x1 = k1[i];
+                    long x2 = k2[i];
+                    if (x1 > x2) {
+                        comp = 1;
+                        break;
+                    } else if (x1 < x2) {
+                        comp = -1;
+                        break;
                     }
-                    return comp;
                 }
-
+                return comp;
             });
             Cursor<int[], byte[]> top = list.get(0);
             int[] key = top.getKey();
@@ -528,7 +511,7 @@ public class ArchiveToolStore {
         }
         key[0] = cs;
         key[1] = bucket;
-        key[2] = DataUtils.getFletcher32(buff, buff.length);
+        key[2] = DataUtils.getFletcher32(buff, 0, buff.length);
         return key;
     }
 

@@ -1,12 +1,14 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
 
 import java.sql.SQLException;
+import java.util.Comparator;
 import org.h2.api.DatabaseEventListener;
+import org.h2.command.CommandInterface;
 import org.h2.command.Prepared;
 import org.h2.message.DbException;
 import org.h2.message.Trace;
@@ -20,9 +22,40 @@ import org.h2.value.ValueString;
  */
 public class MetaRecord implements Comparable<MetaRecord> {
 
+    /**
+     * Comparator for prepared constraints, sorts unique and primary key
+     * constraints first.
+     */
+    static final Comparator<Prepared> CONSTRAINTS_COMPARATOR = (o1, o2) -> {
+        int t1 = o1.getType(), t2 = o2.getType();
+        boolean u1 = t1 == CommandInterface.ALTER_TABLE_ADD_CONSTRAINT_PRIMARY_KEY
+                || t1 == CommandInterface.ALTER_TABLE_ADD_CONSTRAINT_UNIQUE;
+        boolean u2 = t2 == CommandInterface.ALTER_TABLE_ADD_CONSTRAINT_PRIMARY_KEY
+                || t2 == CommandInterface.ALTER_TABLE_ADD_CONSTRAINT_UNIQUE;
+        if (u1 == u2) {
+            return o1.getPersistedObjectId() - o2.getPersistedObjectId();
+        }
+        return u1 ? -1 : 1;
+    };
+
     private final int id;
     private final int objectType;
     private final String sql;
+
+    /**
+     * Copy metadata from the specified object into specified search row.
+     *
+     * @param obj
+     *            database object
+     * @param r
+     *            search row
+     */
+    public static void populateRowFromDBObject(DbObject obj, SearchRow r) {
+        r.setValue(0, ValueInt.get(obj.getId()));
+        r.setValue(1, ValueInt.get(0));
+        r.setValue(2, ValueInt.get(obj.getType()));
+        r.setValue(3, ValueString.get(obj.getCreateSQL()));
+    }
 
     public MetaRecord(SearchRow r) {
         id = r.getValue(0).getInt();
@@ -30,20 +63,23 @@ public class MetaRecord implements Comparable<MetaRecord> {
         sql = r.getValue(3).getString();
     }
 
-    MetaRecord(DbObject obj) {
-        id = obj.getId();
-        objectType = obj.getType();
-        sql = obj.getCreateSQL();
-    }
-    
-    //分别对应ID、HEAD、TYPE、SQL这4个字段
-    void setRecord(SearchRow r) {
-        r.setValue(0, ValueInt.get(id));
-        r.setValue(1, ValueInt.get(0));
-        r.setValue(2, ValueInt.get(objectType));
-        r.setValue(3, ValueString.get(sql));
-    }
-
+//<<<<<<< HEAD
+//    MetaRecord(DbObject obj) {
+//        id = obj.getId();
+//        objectType = obj.getType();
+//        sql = obj.getCreateSQL();
+//    }
+//    
+//    //分别对应ID、HEAD、TYPE、SQL这4个字段
+//    void setRecord(SearchRow r) {
+//        r.setValue(0, ValueInt.get(id));
+//        r.setValue(1, ValueInt.get(0));
+//        r.setValue(2, ValueInt.get(objectType));
+//        r.setValue(3, ValueString.get(sql));
+//    }
+//
+//=======
+//>>>>>>> d9a7cf0dcb563abb69ed313f35cdebfebe544674
     /**
      * Execute the meta data statement.
      *
@@ -51,23 +87,64 @@ public class MetaRecord implements Comparable<MetaRecord> {
      * @param systemSession the system session
      * @param listener the database event listener
      */
-    void execute(Database db, Session systemSession,
-            DatabaseEventListener listener) {
+    void prepareAndExecute(Database db, Session systemSession, DatabaseEventListener listener) {
         try {
             Prepared command = systemSession.prepare(sql);
-            //System.out.println(sql);
-            command.setObjectId(id);
+            command.setPersistedObjectId(id);
             command.update();
         } catch (DbException e) {
-            e = e.addSQL(sql);
-            SQLException s = e.getSQLException();
-            db.getTrace(Trace.DATABASE).error(s, sql);
-            if (listener != null) {
-                listener.exceptionThrown(s, sql);
-                // continue startup in this case
-            } else {
-                throw e;
-            }
+            throwException(db, listener, e, sql);
+        }
+    }
+
+    /**
+     * Prepares the meta data statement.
+     *
+     * @param db the database
+     * @param systemSession the system session
+     * @param listener the database event listener
+     * @return the prepared command
+     */
+    Prepared prepare(Database db, Session systemSession, DatabaseEventListener listener) {
+        try {
+            Prepared command = systemSession.prepare(sql);
+//<<<<<<< HEAD
+//            //System.out.println(sql);
+//            command.setObjectId(id);
+//=======
+            command.setPersistedObjectId(id);
+            return command;
+        } catch (DbException e) {
+            throwException(db, listener, e, sql);
+            return null;
+        }
+    }
+
+    /**
+     * Execute the meta data statement.
+     *
+     * @param db the database
+     * @param command the prepared command
+     * @param listener the database event listener
+     * @param sql SQL
+     */
+    static void execute(Database db, Prepared command, DatabaseEventListener listener, String sql) {
+        try {
+            command.update();
+        } catch (DbException e) {
+            throwException(db, listener, e, sql);
+        }
+    }
+
+    private static void throwException(Database db, DatabaseEventListener listener, DbException e, String sql) {
+        e = e.addSQL(sql);
+        SQLException s = e.getSQLException();
+        db.getTrace(Trace.DATABASE).error(s, sql);
+        if (listener != null) {
+            listener.exceptionThrown(s, sql);
+            // continue startup in this case
+        } else {
+            throw e;
         }
     }
 
@@ -115,7 +192,7 @@ public class MetaRecord implements Comparable<MetaRecord> {
             return 2;
         case DbObject.FUNCTION_ALIAS:
             return 3;
-        case DbObject.USER_DATATYPE:
+        case DbObject.DOMAIN:
             return 4;
         case DbObject.SEQUENCE:
             return 5;

@@ -1,13 +1,11 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.dev.util;
 
 import java.util.Iterator;
-
-import org.h2.mvstore.DataUtils;
 
 /**
  * An immutable array.
@@ -18,7 +16,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
 
     private static final int MAX_LEVEL = 4;
 
-    private static final ImmutableArray3<?> EMPTY = new Plain<Object>(new Object[0]);
+    private static final ImmutableArray3<?> EMPTY = new Plain<>(new Object[0]);
 
     /**
      * Get the length.
@@ -75,7 +73,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         for (int i = 0; i < len; i++) {
             array[i] = get(fromIndex + i);
         }
-        return new Plain<K>(array);
+        return new Plain<>(array);
     }
 
     /**
@@ -84,8 +82,9 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
      * @param array the data
      * @return the new immutable array
      */
+    @SafeVarargs
     public static <K> ImmutableArray3<K> create(K... array) {
-        return new Plain<K>(array);
+        return new Plain<>(array);
     }
 
     /**
@@ -152,11 +151,6 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
                 return a.get(index++);
             }
 
-            @Override
-            public void remove() {
-                throw DataUtils.newUnsupportedOperationException("remove");
-            }
-
         };
     }
 
@@ -189,17 +183,17 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
 
         @Override
         public ImmutableArray3<K> set(int index, K obj) {
-            return new Set<K>(this, index, obj);
+            return new Set<>(this, index, obj);
         }
 
         @Override
         public ImmutableArray3<K> insert(int index, K obj) {
-            return new Insert<K>(this, index, obj);
+            return new Insert<>(this, index, obj);
         }
 
         @Override
         public ImmutableArray3<K> remove(int index) {
-            return new Remove<K>(this, index);
+            return new Remove<>(this, index);
         }
 
         /**
@@ -218,7 +212,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
             for (int i = 0; i < len; i++) {
                 array[i] = i == index ? obj : base.get(i);
             }
-            return new Plain<K>(array);
+            return new Plain<>(array);
         }
 
         /**
@@ -237,7 +231,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
             for (int i = 0; i < len; i++) {
                 array[i] = i == index ? obj : i < index ? base.get(i) : base.get(i - 1);
             }
-            return new Plain<K>(array);
+            return new Plain<>(array);
         }
 
         /**
@@ -255,7 +249,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
             for (int i = 0; i < len; i++) {
                 array[i] = i < index ? base.get(i) : base.get(i + 1);
             }
-            return new Plain<K>(array);
+            return new Plain<>(array);
         }
 
         @Override
@@ -296,9 +290,9 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> set(int index, K obj) {
             if (index == this.index) {
-                return new Set<K>(base, index, obj);
+                return new Set<>(base, index, obj);
             } else if (level() < MAX_LEVEL) {
-                return new Set<K>(this, index, obj);
+                return new Set<>(this, index, obj);
             }
             return Plain.set(this, index, obj);
         }
@@ -306,7 +300,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> insert(int index, K obj) {
             if (level() < MAX_LEVEL) {
-                return new Insert<K>(this, index, obj);
+                return new Insert<>(this, index, obj);
             }
             return Plain.insert(this, index, obj);
         }
@@ -314,7 +308,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> remove(int index) {
             if (level() < MAX_LEVEL) {
-                return new Remove<K>(this, index);
+                return new Remove<>(this, index);
             }
             return Plain.remove(this, index);
         }
@@ -347,7 +341,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> set(int index, K obj) {
             if (level() < MAX_LEVEL) {
-                return new Set<K>(this, index, obj);
+                return new Set<>(this, index, obj);
             }
             return Plain.set(this, index, obj);
         }
@@ -355,7 +349,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> insert(int index, K obj) {
             if (level() < MAX_LEVEL) {
-                return new Insert<K>(this, index, obj);
+                return new Insert<>(this, index, obj);
             }
             return Plain.insert(this, index, obj);
         }
@@ -365,7 +359,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
             if (index == this.index) {
                 return base;
             } else if (level() < MAX_LEVEL) {
-                return new Remove<K>(this, index);
+                return new Remove<>(this, index);
             }
             return Plain.remove(this, index);
         }
@@ -411,7 +405,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> set(int index, K obj) {
             if (level() < MAX_LEVEL) {
-                return new Set<K>(this, index, obj);
+                return new Set<>(this, index, obj);
             }
             return Plain.set(this, index, obj);
         }
@@ -421,7 +415,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
             if (index == this.index) {
                 return base.set(index, obj);
             } else if (level() < MAX_LEVEL) {
-                return new Insert<K>(this, index, obj);
+                return new Insert<>(this, index, obj);
             }
             return Plain.insert(this, index, obj);
         }
@@ -429,7 +423,7 @@ public abstract class ImmutableArray3<K> implements Iterable<K> {
         @Override
         public ImmutableArray3<K> remove(int index) {
             if (level() < MAX_LEVEL) {
-                return new Remove<K>(this, index);
+                return new Remove<>(this, index);
             }
             return Plain.remove(this, index);
         }

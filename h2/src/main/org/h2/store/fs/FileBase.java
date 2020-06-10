@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.store.fs;
@@ -17,21 +17,6 @@ import java.nio.channels.WritableByteChannel;
  * The base class for file implementations.
  */
 public abstract class FileBase extends FileChannel {
-
-    @Override
-    public abstract long size() throws IOException;
-
-    @Override
-    public abstract long position() throws IOException;
-
-    @Override
-    public abstract FileChannel position(long newPosition) throws IOException;
-
-    @Override
-    public abstract int read(ByteBuffer dst) throws IOException;
-
-    @Override
-    public abstract int write(ByteBuffer src) throws IOException;
 
     @Override
     public synchronized int read(ByteBuffer dst, long position)
@@ -52,9 +37,6 @@ public abstract class FileBase extends FileChannel {
         position(oldPos);
         return len;
     }
-
-    @Override
-    public abstract FileChannel truncate(long size) throws IOException;
 
     @Override
     public void force(boolean metaData) throws IOException {

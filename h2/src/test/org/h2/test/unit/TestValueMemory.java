@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.unit;
@@ -12,19 +12,21 @@ import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.IdentityHashMap;
 import java.util.Random;
+
+import org.h2.api.IntervalQualifier;
 import org.h2.api.JavaObjectSerializer;
 import org.h2.engine.Constants;
+import org.h2.result.SimpleResult;
 import org.h2.store.DataHandler;
 import org.h2.store.FileStore;
 import org.h2.store.LobStorageFrontend;
 import org.h2.test.TestBase;
 import org.h2.test.utils.MemoryFootprint;
-import org.h2.tools.SimpleResultSet;
+import org.h2.util.DateTimeUtils;
 import org.h2.util.SmallLRUCache;
 import org.h2.util.TempFileDeleter;
 import org.h2.util.Utils;
 import org.h2.value.CompareMode;
-import org.h2.value.DataType;
 import org.h2.value.Value;
 import org.h2.value.ValueArray;
 import org.h2.value.ValueBoolean;
@@ -36,15 +38,19 @@ import org.h2.value.ValueDouble;
 import org.h2.value.ValueFloat;
 import org.h2.value.ValueGeometry;
 import org.h2.value.ValueInt;
+import org.h2.value.ValueInterval;
 import org.h2.value.ValueJavaObject;
+import org.h2.value.ValueJson;
 import org.h2.value.ValueLong;
 import org.h2.value.ValueNull;
 import org.h2.value.ValueResultSet;
+import org.h2.value.ValueRow;
 import org.h2.value.ValueShort;
 import org.h2.value.ValueString;
 import org.h2.value.ValueStringFixed;
 import org.h2.value.ValueStringIgnoreCase;
 import org.h2.value.ValueTime;
+import org.h2.value.ValueTimeTimeZone;
 import org.h2.value.ValueTimestamp;
 import org.h2.value.ValueTimestampTimeZone;
 import org.h2.value.ValueUuid;
@@ -54,6 +60,10 @@ import org.h2.value.ValueUuid;
  * they occupy, and this tests if this estimation is correct.
  */
 public class TestValueMemory extends TestBase implements DataHandler {
+
+    private static final long MIN_ABSOLUTE_DAY = DateTimeUtils.absoluteDayFromDateValue(DateTimeUtils.MIN_DATE_VALUE);
+
+    private static final long MAX_ABSOLUTE_DAY = DateTimeUtils.absoluteDayFromDateValue(DateTimeUtils.MAX_DATE_VALUE);
 
     private final Random random = new Random(1);
     private final SmallLRUCache<String, String[]> lobFileListCache = SmallLRUCache
@@ -81,8 +91,12 @@ public class TestValueMemory extends TestBase implements DataHandler {
                 // experiment
                 continue;
             }
+            if (i == Value.ENUM) {
+                // TODO ENUM
+                continue;
+            }
             Value v = create(i);
-            String s = "type: " + v.getType() +
+            String s = "type: " + v.getValueType() +
                     " calculated: " + v.getMemory() +
                     " real: " + MemoryFootprint.getObjectSize(v) + " " +
                     v.getClass().getName() + ": " + v.toString();
@@ -94,12 +108,16 @@ public class TestValueMemory extends TestBase implements DataHandler {
                 // experiment
                 continue;
             }
+            if (i == Value.ENUM) {
+                // TODO ENUM
+                continue;
+            }
             Value v = create(i);
             if (v == ValueNull.INSTANCE && i == Value.GEOMETRY) {
                 // jts not in the classpath, OK
                 continue;
             }
-            assertEquals(i, v.getType());
+            assertEquals(i, v.getValueType());
             testType(i);
         }
     }
@@ -115,7 +133,7 @@ public class TestValueMemory extends TestBase implements DataHandler {
         System.gc();
         System.gc();
         long first = Utils.getMemoryUsed();
-        ArrayList<Value> list = new ArrayList<Value>();
+        ArrayList<Value> list = new ArrayList<>();
         long memory = 0;
         while (memory < 1000000) {
             Value v = create(type);
@@ -123,7 +141,7 @@ public class TestValueMemory extends TestBase implements DataHandler {
             list.add(v);
         }
         Object[] array = list.toArray();
-        IdentityHashMap<Object, Object> map = new IdentityHashMap<Object, Object>();
+        IdentityHashMap<Object, Object> map = new IdentityHashMap<>();
         for (Object a : array) {
             map.put(a, a);
         }
@@ -151,41 +169,38 @@ public class TestValueMemory extends TestBase implements DataHandler {
         case Value.NULL:
             return ValueNull.INSTANCE;
         case Value.BOOLEAN:
-            return ValueBoolean.get(false);
-        case Value.BYTE:
+            return ValueBoolean.FALSE;
+        case Value.TINYINT:
             return ValueByte.get((byte) random.nextInt());
-        case Value.SHORT:
+        case Value.SMALLINT:
             return ValueShort.get((short) random.nextInt());
         case Value.INT:
             return ValueInt.get(random.nextInt());
-        case Value.LONG:
+        case Value.BIGINT:
             return ValueLong.get(random.nextLong());
-        case Value.DECIMAL:
+        case Value.NUMERIC:
             return ValueDecimal.get(new BigDecimal(random.nextInt()));
             // + "12123344563456345634565234523451312312"
         case Value.DOUBLE:
             return ValueDouble.get(random.nextDouble());
-        case Value.FLOAT:
+        case Value.REAL:
             return ValueFloat.get(random.nextFloat());
         case Value.TIME:
-            return ValueTime.get(new java.sql.Time(random.nextLong()));
+            return ValueTime.fromNanos(randomTimeNanos());
+        case Value.TIME_TZ:
+            return ValueTimeTimeZone.fromNanos(randomTimeNanos(), randomZoneOffset());
         case Value.DATE:
-            return ValueDate.get(new java.sql.Date(random.nextLong()));
+            return ValueDate.fromDateValue(randomDateValue());
         case Value.TIMESTAMP:
-            return ValueTimestamp.fromMillis(random.nextLong());
+            return ValueTimestamp.fromDateValueAndNanos(randomDateValue(), randomTimeNanos());
         case Value.TIMESTAMP_TZ:
-            // clamp to max legal value
-            long nanos = Math.max(Math.min(random.nextLong(),
-                    24L * 60 * 60 * 1000 * 1000 * 1000 - 1), 0);
-            int timeZoneOffsetMins = (int) (random.nextFloat() * (24 * 60))
-                    - (12 * 60);
             return ValueTimestampTimeZone.fromDateValueAndNanos(
-                    random.nextLong(), nanos, (short) timeZoneOffsetMins);
-        case Value.BYTES:
+                    randomDateValue(), randomTimeNanos(), randomZoneOffset());
+        case Value.VARBINARY:
             return ValueBytes.get(randomBytes(random.nextInt(1000)));
-        case Value.STRING:
+        case Value.VARCHAR:
             return ValueString.get(randomString(random.nextInt(100)));
-        case Value.STRING_IGNORECASE:
+        case Value.VARCHAR_IGNORECASE:
             return ValueStringIgnoreCase.get(randomString(random.nextInt(100)));
         case Value.BLOB: {
             int len = (int) Math.abs(random.nextGaussian() * 10);
@@ -197,31 +212,66 @@ public class TestValueMemory extends TestBase implements DataHandler {
             String s = randomString(len);
             return getLobStorage().createClob(new StringReader(s), len);
         }
-        case Value.ARRAY: {
-            int len = random.nextInt(20);
-            Value[] list = new Value[len];
-            for (int i = 0; i < list.length; i++) {
-                list[i] = create(Value.STRING);
-            }
-            return ValueArray.get(list);
-        }
+        case Value.ARRAY:
+            return ValueArray.get(createArray());
+        case Value.ROW:
+            return ValueRow.get(createArray());
         case Value.RESULT_SET:
-            return ValueResultSet.get(new SimpleResultSet());
+            return ValueResultSet.get(new SimpleResult());
         case Value.JAVA_OBJECT:
             return ValueJavaObject.getNoCopy(null, randomBytes(random.nextInt(100)), this);
         case Value.UUID:
             return ValueUuid.get(random.nextLong(), random.nextLong());
-        case Value.STRING_FIXED:
+        case Value.CHAR:
             return ValueStringFixed.get(randomString(random.nextInt(100)));
         case Value.GEOMETRY:
-            if (DataType.GEOMETRY_CLASS == null) {
-                return ValueNull.INSTANCE;
-            }
-            return ValueGeometry.get("POINT (" + random.nextInt(100) + " " +
-                    random.nextInt(100) + ")");
+            return ValueGeometry.get("POINT (" + random.nextInt(100) + ' ' + random.nextInt(100) + ')');
+        case Value.INTERVAL_YEAR:
+        case Value.INTERVAL_MONTH:
+        case Value.INTERVAL_DAY:
+        case Value.INTERVAL_HOUR:
+        case Value.INTERVAL_MINUTE:
+            return ValueInterval.from(IntervalQualifier.valueOf(type - Value.INTERVAL_YEAR),
+                    random.nextBoolean(), random.nextInt(Integer.MAX_VALUE), 0);
+        case Value.INTERVAL_SECOND:
+        case Value.INTERVAL_DAY_TO_SECOND:
+        case Value.INTERVAL_HOUR_TO_SECOND:
+        case Value.INTERVAL_MINUTE_TO_SECOND:
+            return ValueInterval.from(IntervalQualifier.valueOf(type - Value.INTERVAL_YEAR),
+                    random.nextBoolean(), random.nextInt(Integer.MAX_VALUE), random.nextInt(1_000_000_000));
+        case Value.INTERVAL_YEAR_TO_MONTH:
+        case Value.INTERVAL_DAY_TO_HOUR:
+        case Value.INTERVAL_DAY_TO_MINUTE:
+        case Value.INTERVAL_HOUR_TO_MINUTE:
+            return ValueInterval.from(IntervalQualifier.valueOf(type - Value.INTERVAL_YEAR),
+                    random.nextBoolean(), random.nextInt(Integer.MAX_VALUE), random.nextInt(12));
+        case Value.JSON:
+            return ValueJson.fromJson("{\"key\":\"value\"}");
         default:
             throw new AssertionError("type=" + type);
         }
+    }
+
+    private long randomDateValue() {
+        return DateTimeUtils.dateValueFromAbsoluteDay(
+                (random.nextLong() & Long.MAX_VALUE) % (MAX_ABSOLUTE_DAY - MIN_ABSOLUTE_DAY + 1) + MIN_ABSOLUTE_DAY);
+    }
+
+    private long randomTimeNanos() {
+        return (random.nextLong() & Long.MAX_VALUE) % DateTimeUtils.NANOS_PER_DAY;
+    }
+
+    private short randomZoneOffset() {
+        return (short) (random.nextInt() % (18 * 60));
+    }
+
+    private Value[] createArray() throws SQLException {
+        int len = random.nextInt(20);
+        Value[] list = new Value[len];
+        for (int i = 0; i < list.length; i++) {
+            list[i] = create(Value.VARCHAR);
+        }
+        return list;
     }
 
     private byte[] randomBytes(int len) {

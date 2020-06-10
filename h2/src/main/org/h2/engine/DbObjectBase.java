@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
@@ -43,7 +43,7 @@ public abstract class DbObjectBase implements DbObject {
      * @param name the name
      * @param traceModuleId the trace module id
      */
-    protected void initDbObjectBase(Database db, int objectId, String name,
+    protected DbObjectBase(Database db, int objectId, String name,
             int traceModuleId) {
         this.database = db;
         this.trace = db.getTrace(traceModuleId);
@@ -53,22 +53,6 @@ public abstract class DbObjectBase implements DbObject {
     }
 
     /**
-     * Build a SQL statement to re-create this object.
-     *
-     * @return the SQL statement
-     */
-    @Override
-    public abstract String getCreateSQL();
-
-    /**
-     * Build a SQL statement to drop this object.
-     *
-     * @return the SQL statement
-     */
-    @Override
-    public abstract String getDropSQL();
-
-    /**
      * Remove all dependent objects and free all resources (files, blocks in
      * files) of this object.
      *
@@ -76,12 +60,6 @@ public abstract class DbObjectBase implements DbObject {
      */
     @Override
     public abstract void removeChildrenAndResources(Session session);
-
-    /**
-     * Check if this object can be renamed. System objects may not be renamed.
-     */
-    @Override
-    public abstract void checkRename();
 
     /**
      * Tell the object that is was modified.
@@ -100,8 +78,13 @@ public abstract class DbObjectBase implements DbObject {
     }
 
     @Override
-    public String getSQL() {
-        return Parser.quoteIdentifier(objectName);
+    public String getSQL(boolean alwaysQuote) {
+        return Parser.quoteIdentifier(objectName, alwaysQuote);
+    }
+
+    @Override
+    public StringBuilder getSQL(StringBuilder builder, boolean alwaysQuote) {
+        return Parser.quoteIdentifier(builder, objectName, alwaysQuote);
     }
 
     @Override
@@ -129,7 +112,7 @@ public abstract class DbObjectBase implements DbObject {
      * used.
      */
     protected void invalidate() {
-        if (SysProperties.CHECK && id == -1) {
+        if (id == -1) {
             throw DbException.throwInternalError();
         }
         setModified();

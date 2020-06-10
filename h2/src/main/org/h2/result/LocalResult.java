@@ -1,22 +1,25 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.result;
 
-import java.sql.ResultSet;
-import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.TreeMap;
+
 import org.h2.engine.Database;
 import org.h2.engine.Session;
+import org.h2.engine.SessionInterface;
+import org.h2.engine.SysProperties;
 import org.h2.expression.Expression;
 import org.h2.message.DbException;
-import org.h2.util.New;
-import org.h2.util.ValueHashMap;
-import org.h2.value.DataType;
+import org.h2.mvstore.db.MVTempResult;
+import org.h2.util.Utils;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
-import org.h2.value.ValueArray;
+import org.h2.value.ValueRow;
 
 /**
  * A local result set contains all row data of a result set.
@@ -24,28 +27,35 @@ import org.h2.value.ValueArray;
  * and it is also used directly by the ResultSet class in the embedded mode.
  * If the result does not fit in memory, it is written to a temporary file.
  */
-//RowList用于执行update、delete时存放先读取出来的记录
-//LocalResult用于在server端执行select时存放查询结果
-//ResultRemote用于存放client端从server端返回的结果
+//<<<<<<< HEAD
+////RowList用于执行update、delete时存放先读取出来的记录
+////LocalResult用于在server端执行select时存放查询结果
+////ResultRemote用于存放client端从server端返回的结果
 public class LocalResult implements ResultInterface, ResultTarget {
 
     private int maxMemoryRows;
     private Session session;
     private int visibleColumnCount;
+    private int resultColumnCount;
     private Expression[] expressions;
     private int rowId, rowCount;
     private ArrayList<Value[]> rows;
     private SortOrder sort;
-    private ValueHashMap<Value[]> distinctRows;
+    // HashSet cannot be used here, because we need to compare values of
+    // different type or scale properly.
+    private TreeMap<Value, Value[]> distinctRows;
     private Value[] currentRow;
     private int offset;
     private int limit = -1;
+    private boolean fetchPercent;
+    private SortOrder withTiesSortOrder;
+    private boolean limitsWereApplied;
     private ResultExternal external;
-    private int diskOffset;
     private boolean distinct;
-    private boolean randomAccess;
+    private int[] distinctIndexes;
     private boolean closed;
     private boolean containsLobs;
+    private Boolean containsNull;
 
     /**
      * Construct a local result object.
@@ -57,12 +67,17 @@ public class LocalResult implements ResultInterface, ResultTarget {
     /**
      * Construct a local result object.
      *
-     * @param session the session
-     * @param expressions the expression array
-     * @param visibleColumnCount the number of visible columns
+     * @param session
+     *            the session
+     * @param expressions
+     *            the expression array
+     * @param visibleColumnCount
+     *            the number of visible columns
+     * @param resultColumnCount
+     *            the number of columns including visible columns and additional
+     *            virtual columns for ORDER BY and DISTINCT ON clauses
      */
-    public LocalResult(Session session, Expression[] expressions,
-            int visibleColumnCount) {
+    public LocalResult(Session session, Expression[] expressions, int visibleColumnCount, int resultColumnCount) {
         this.session = session;
         if (session == null) {
             this.maxMemoryRows = Integer.MAX_VALUE;
@@ -74,8 +89,9 @@ public class LocalResult implements ResultInterface, ResultTarget {
                 this.maxMemoryRows = Integer.MAX_VALUE;
             }
         }
-        rows = New.arrayList();
+        rows = Utils.newSmallArrayList();
         this.visibleColumnCount = visibleColumnCount;
+        this.resultColumnCount = resultColumnCount;
         rowId = -1;
         this.expressions = expressions;
     }
@@ -85,37 +101,15 @@ public class LocalResult implements ResultInterface, ResultTarget {
         return false;
     }
 
+    /**
+     * Redefine count of maximum rows holds in memory for the result.
+     *
+     * @param maxValue Maximum rows count in memory.
+     *
+     * @see SysProperties#MAX_MEMORY_ROWS
+     */
     public void setMaxMemoryRows(int maxValue) {
         this.maxMemoryRows = maxValue;
-    }
-
-    /**
-     * Construct a local result set by reading all data from a regular result
-     * set.
-     *
-     * @param session the session
-     * @param rs the result set
-     * @param maxrows the maximum number of rows to read (0 for no limit)
-     * @return the local result set
-     */
-    public static LocalResult read(Session session, ResultSet rs, int maxrows) {
-        Expression[] cols = Expression.getExpressionColumns(session, rs);
-        int columnCount = cols.length;
-        LocalResult result = new LocalResult(session, cols, columnCount);
-        try {
-            for (int i = 0; (maxrows == 0 || i < maxrows) && rs.next(); i++) {
-                Value[] list = new Value[columnCount];
-                for (int j = 0; j < columnCount; j++) {
-                    int type = result.getColumnType(j);
-                    list[j] = DataType.readValue(session, rs, j + 1, type);
-                }
-                result.addRow(list);
-            }
-        } catch (SQLException e) {
-            throw DbException.convert(e);
-        }
-        result.done();
-        return result;
     }
 
     /**
@@ -126,7 +120,7 @@ public class LocalResult implements ResultInterface, ResultTarget {
      * @return the copy if possible, or null if copying is not possible
      */
     @Override
-    public LocalResult createShallowCopy(Session targetSession) {
+    public LocalResult createShallowCopy(SessionInterface targetSession) {
         if (external == null && (rows == null || rows.size() < rowCount)) {
             return null;
         }
@@ -142,8 +136,9 @@ public class LocalResult implements ResultInterface, ResultTarget {
         }
         LocalResult copy = new LocalResult();
         copy.maxMemoryRows = this.maxMemoryRows;
-        copy.session = targetSession;
+        copy.session = (Session) targetSession;
         copy.visibleColumnCount = this.visibleColumnCount;
+        copy.resultColumnCount = this.resultColumnCount;
         copy.expressions = this.expressions;
         copy.rowId = -1;
         copy.rowCount = this.rowCount;
@@ -151,17 +146,18 @@ public class LocalResult implements ResultInterface, ResultTarget {
         copy.sort = this.sort;
         copy.distinctRows = this.distinctRows;
         copy.distinct = distinct;
-        copy.randomAccess = randomAccess;
+        copy.distinctIndexes = distinctIndexes;
         copy.currentRow = null;
         copy.offset = 0;
         copy.limit = -1;
         copy.external = e2;
-        copy.diskOffset = this.diskOffset;
+        copy.containsNull = containsNull;
         return copy;
     }
 
     /**
-     * Set the sort order.
+     * Sets sort order to be used by this result. When rows are presorted by the
+     * query this method should not be used.
      *
      * @param sort the sort order
      */
@@ -173,15 +169,75 @@ public class LocalResult implements ResultInterface, ResultTarget {
      * Remove duplicate rows.
      */
     public void setDistinct() {
+        assert distinctIndexes == null;
         distinct = true;
-        distinctRows = ValueHashMap.newInstance();
+        distinctRows = new TreeMap<>(session.getDatabase().getCompareMode());
     }
 
     /**
-     * Random access is required (containsDistinct).
+     * Remove rows with duplicates in columns with specified indexes.
+     *
+     * @param distinctIndexes distinct indexes
      */
-    public void setRandomAccess() {
-        this.randomAccess = true;
+    public void setDistinct(int[] distinctIndexes) {
+        assert !distinct;
+        this.distinctIndexes = distinctIndexes;
+        distinctRows = new TreeMap<>(session.getDatabase().getCompareMode());
+    }
+
+    /**
+     * @return whether this result is a distinct result
+     */
+    private boolean isAnyDistinct() {
+        return distinct || distinctIndexes != null;
+    }
+
+    /**
+     * Check if this result set contains the given row.
+     *
+     * @param values the row
+     * @return true if the row exists
+     */
+    public boolean containsDistinct(Value[] values) {
+        assert values.length == visibleColumnCount;
+        if (external != null) {
+            return external.contains(values);
+        }
+        if (distinctRows == null) {
+            distinctRows = new TreeMap<>(session.getDatabase().getCompareMode());
+            for (Value[] row : rows) {
+                ValueRow array = getDistinctRow(row);
+                distinctRows.put(array, array.getList());
+            }
+        }
+        ValueRow array = ValueRow.get(values);
+        return distinctRows.get(array) != null;
+    }
+
+    /**
+     * Check if this result set contains a NULL value. This method may reset
+     * this result.
+     *
+     * @return true if there is a NULL value
+     */
+    public boolean containsNull() {
+        Boolean r = containsNull;
+        if (r == null) {
+            r = false;
+            reset();
+            loop: while (next()) {
+                Value[] row = currentRow;
+                for (int i = 0; i < visibleColumnCount; i++) {
+                    if (row[i].containsNull()) {
+                        r = true;
+                        break loop;
+                    }
+                }
+            }
+            reset();
+            containsNull = r;
+        }
+        return r;
     }
 
     /**
@@ -193,35 +249,14 @@ public class LocalResult implements ResultInterface, ResultTarget {
         if (!distinct) {
             DbException.throwInternalError();
         }
+        assert values.length == visibleColumnCount;
         if (distinctRows != null) {
-            ValueArray array = ValueArray.get(values);
+            ValueRow array = ValueRow.get(values);
             distinctRows.remove(array);
             rowCount = distinctRows.size();
         } else {
             rowCount = external.removeRow(values);
         }
-    }
-
-    /**
-     * Check if this result set contains the given row.
-     *
-     * @param values the row
-     * @return true if the row exists
-     */
-    @Override
-    public boolean containsDistinct(Value[] values) {
-        if (external != null) {
-            return external.contains(values);
-        }
-        if (distinctRows == null) {
-            distinctRows = ValueHashMap.newInstance();
-            for (Value[] row : rows) {
-                ValueArray array = getArrayOfVisible(row);
-                distinctRows.put(array, array.getList());
-            }
-        }
-        ValueArray array = ValueArray.get(values);
-        return distinctRows.get(array) != null;
     }
 
     @Override
@@ -230,11 +265,6 @@ public class LocalResult implements ResultInterface, ResultTarget {
         currentRow = null;
         if (external != null) {
             external.reset();
-            if (diskOffset > 0) {
-                for (int i = 0; i < diskOffset; i++) {
-                    external.next();
-                }
-            }
         }
     }
 
@@ -282,13 +312,23 @@ public class LocalResult implements ResultInterface, ResultTarget {
         }
     }
 
-    private ValueArray getArrayOfVisible(Value[] values) {
-        if (values.length > visibleColumnCount) {
-            Value[] v2 = new Value[visibleColumnCount];
-            System.arraycopy(values, 0, v2, 0, visibleColumnCount);
-            values = v2;
+    private ValueRow getDistinctRow(Value[] values) {
+        if (distinctIndexes != null) {
+            int cnt = distinctIndexes.length;
+            Value[] newValues = new Value[cnt];
+            for (int i = 0; i < cnt; i++) {
+                newValues[i] = values[distinctIndexes[i]];
+            }
+            values = newValues;
+        } else if (values.length > visibleColumnCount) {
+            values = Arrays.copyOf(values, visibleColumnCount);
         }
-        return ValueArray.get(values);
+        return ValueRow.get(values);
+    }
+
+    private void createExternalResult() {
+        external = MVTempResult.of(session.getDatabase(), expressions, distinct, distinctIndexes, visibleColumnCount,
+                resultColumnCount, sort);
     }
 
     /**
@@ -297,36 +337,38 @@ public class LocalResult implements ResultInterface, ResultTarget {
      * @param values the row to add
      */
     @Override
-    public void addRow(Value[] values) {
-    	//distinct和randomAccess(通过ConditionInSelect触发)使用ResultTempTable，其他使用ResultDiskBuffer
-    	//maxMemoryRows、maxMemoryRowsDistinct默认值都是1万
+    public void addRow(Value... values) {
+        assert values.length == resultColumnCount;
         cloneLobs(values);
-        if (distinct) {
+        if (isAnyDistinct()) {
             if (distinctRows != null) {
-                ValueArray array = getArrayOfVisible(values);
-                distinctRows.put(array, values); //会触发ValueArray的hashCode方法
+                ValueRow array = getDistinctRow(values);
+                Value[] previous = distinctRows.get(array);
+                if (previous == null || sort != null && sort.compare(previous, values) > 0) {
+                    distinctRows.put(array, values);
+                }
                 rowCount = distinctRows.size();
                 if (rowCount > maxMemoryRows) {
-                    external = new ResultTempTable(session, expressions, true, sort);
+                    createExternalResult();
                     rowCount = external.addRows(distinctRows.values());
                     distinctRows = null;
                 }
             } else {
                 rowCount = external.addRow(values);
             }
-            return;
-        }
-        rows.add(values);
-        rowCount++;
-        if (rows.size() > maxMemoryRows) {
-            if (external == null) {
-                external = new ResultTempTable(session, expressions, false, sort);
+        } else {
+            rows.add(values);
+            rowCount++;
+            if (rows.size() > maxMemoryRows) {
+                addRowsToDisk();
             }
-            addRowsToDisk();
         }
     }
 
     private void addRowsToDisk() {
+        if (external == null) {
+            createExternalResult();
+        }
         rowCount = external.addRows(rows);
         rows.clear();
     }
@@ -340,52 +382,109 @@ public class LocalResult implements ResultInterface, ResultTarget {
      * This method is called after all rows have been added.
      */
     public void done() {
-        if (distinct) {
-            if (distinctRows != null) {
-                rows = distinctRows.values();
-            } else {
-                if (external != null && sort != null) {
-                    // external sort
-                    ResultExternal temp = external;
-                    external = null;
-                    temp.reset();
-                    rows = New.arrayList();
-                    // TODO use offset directly if possible
-                    while (true) {
-                        Value[] list = temp.next();
-                        if (list == null) {
-                            break;
-                        }
-                        if (external == null) {
-                            external = new ResultTempTable(session, expressions, true, sort);
-                        }
-                        rows.add(list);
-                        if (rows.size() > maxMemoryRows) {
-                            rowCount = external.addRows(rows);
-                            rows.clear();
-                        }
-                    }
-                    temp.close();
-                    // the remaining data in rows is written in the following
-                    // lines
-                }
-            }
-        }
         if (external != null) {
             addRowsToDisk();
-            external.done();
         } else {
-            if (sort != null) {
-                if (offset > 0 || limit > 0) {
-                    sort.sort(rows, offset, limit < 0 ? rows.size() : limit);
+            if (isAnyDistinct()) {
+                rows = new ArrayList<>(distinctRows.values());
+            }
+            if (sort != null && limit != 0 && !limitsWereApplied) {
+                boolean withLimit = limit > 0 && withTiesSortOrder == null;
+                if (offset > 0 || withLimit) {
+                    sort.sort(rows, offset, withLimit ? limit : rows.size());
                 } else {
                     sort.sort(rows);
                 }
             }
         }
-        applyOffset();
-        applyLimit();
+        applyOffsetAndLimit();
         reset();
+    }
+
+    private void applyOffsetAndLimit() {
+        if (limitsWereApplied) {
+            return;
+        }
+        int offset = Math.max(this.offset, 0);
+        int limit = this.limit;
+        if (offset == 0 && limit < 0 && !fetchPercent || rowCount == 0) {
+            return;
+        }
+        if (fetchPercent) {
+            if (limit < 0 || limit > 100) {
+                throw DbException.getInvalidValueException("FETCH PERCENT", limit);
+            }
+            // Oracle rounds percent up, do the same for now
+            limit = (int) (((long) limit * rowCount + 99) / 100);
+        }
+        boolean clearAll = offset >= rowCount || limit == 0;
+        if (!clearAll) {
+            int remaining = rowCount - offset;
+            limit = limit < 0 ? remaining : Math.min(remaining, limit);
+            if (offset == 0 && remaining <= limit) {
+                return;
+            }
+        } else {
+            limit = 0;
+        }
+        distinctRows = null;
+        rowCount = limit;
+        if (external == null) {
+            if (clearAll) {
+                rows.clear();
+                return;
+            }
+            int to = offset + limit;
+            if (withTiesSortOrder != null) {
+                Value[] expected = rows.get(to - 1);
+                while (to < rows.size() && withTiesSortOrder.compare(expected, rows.get(to)) == 0) {
+                    to++;
+                    rowCount++;
+                }
+            }
+            if (offset != 0 || to != rows.size()) {
+                // avoid copying the whole array for each row
+                rows = new ArrayList<>(rows.subList(offset, to));
+            }
+        } else {
+            if (clearAll) {
+                external.close();
+                external = null;
+                return;
+            }
+            trimExternal(offset, limit);
+        }
+    }
+
+    private void trimExternal(int offset, int limit) {
+        ResultExternal temp = external;
+        external = null;
+        temp.reset();
+        while (--offset >= 0) {
+            temp.next();
+        }
+        Value[] row = null;
+        while (--limit >= 0) {
+            row = temp.next();
+            rows.add(row);
+            if (rows.size() > maxMemoryRows) {
+                addRowsToDisk();
+            }
+        }
+        if (withTiesSortOrder != null && row != null) {
+            Value[] expected = row;
+            while ((row = temp.next()) != null && withTiesSortOrder.compare(expected, row) == 0) {
+                rows.add(row);
+                rowCount++;
+                if (rows.size() > maxMemoryRows) {
+                    addRowsToDisk();
+                }
+            }
+        }
+        if (external != null) {
+            addRowsToDisk();
+        }
+        temp.close();
     }
 
     @Override
@@ -394,10 +493,55 @@ public class LocalResult implements ResultInterface, ResultTarget {
     }
 
     @Override
+    public void limitsWereApplied() {
+        this.limitsWereApplied = true;
+    }
+
+    @Override
     public boolean hasNext() {
         return !closed && rowId < rowCount - 1;
     }
 
+//      @Override
+//      public void addRow(Value[] values) {
+//        //distinct和randomAccess(通过ConditionInSelect触发)使用ResultTempTable，其他使用ResultDiskBuffer
+//        //maxMemoryRows、maxMemoryRowsDistinct默认值都是1万
+//          cloneLobs(values);
+//          if (distinct) {
+//              if (distinctRows != null) {
+//                  ValueArray array = getArrayOfVisible(values);
+//                  distinctRows.put(array, values); //会触发ValueArray的hashCode方法
+//                  rowCount = distinctRows.size();
+//                  if (rowCount > maxMemoryRows) {
+//                      external = new ResultTempTable(session, expressions, true, sort);
+//                      rowCount = external.addRows(distinctRows.values());
+//                      distinctRows = null;
+//                  }
+//              } else {
+//                  rowCount = external.addRow(values);
+//              }
+//              return;
+//          }
+//          rows.add(values);
+//          rowCount++;
+//          if (rows.size() > maxMemoryRows) {
+//              if (external == null) {
+//                  external = new ResultTempTable(session, expressions, false, sort);
+//              }
+//              addRowsToDisk();
+//          }
+//      }
+  //
+//      private void addRowsToDisk() {
+//          rowCount = external.addRows(rows);
+//          rows.clear();
+//      }
+  //
+//      @Override
+//      public int getVisibleColumnCount() {
+//          return visibleColumnCount;
+//      }
+    
     /**
      * Set the number of rows that this result will return at the maximum.
      *
@@ -407,22 +551,24 @@ public class LocalResult implements ResultInterface, ResultTarget {
         this.limit = limit;
     }
 
-    private void applyLimit() {
-        if (limit < 0) {
-            return;
-        }
-        if (external == null) {
-            if (rows.size() > limit) {
-                rows = New.arrayList(rows.subList(0, limit));
-                rowCount = limit;
-                distinctRows = null;
-            }
-        } else {
-            if (limit < rowCount) {
-                rowCount = limit;
-                distinctRows = null;
-            }
-        }
+    /**
+     * @param fetchPercent whether limit expression specifies percentage of rows
+     */
+    public void setFetchPercent(boolean fetchPercent) {
+        this.fetchPercent = fetchPercent;
+    }
+
+    /**
+     * Enables inclusion of tied rows to result and sets the sort order for tied
+     * rows. The specified sort order must be the same as sort order if sort
+     * order was set. Passed value will be used if sort order was not set that
+     * is possible when rows are presorted.
+     *
+     * @param withTiesSortOrder the sort order for tied rows
+     */
+    public void setWithTies(SortOrder withTiesSortOrder) {
+        assert sort == null || sort == withTiesSortOrder;
+        this.withTiesSortOrder = withTiesSortOrder;
     }
 
     @Override
@@ -455,23 +601,13 @@ public class LocalResult implements ResultInterface, ResultTarget {
     }
 
     @Override
-    public int getDisplaySize(int i) {
-        return expressions[i].getDisplaySize();
-    }
-
-    @Override
     public String getColumnName(int i) {
         return expressions[i].getColumnName();
     }
 
     @Override
-    public int getColumnType(int i) {
+    public TypeInfo getColumnType(int i) {
         return expressions[i].getType();
-    }
-
-    @Override
-    public long getColumnPrecision(int i) {
-        return expressions[i].getPrecision();
     }
 
     @Override
@@ -484,11 +620,6 @@ public class LocalResult implements ResultInterface, ResultTarget {
         return expressions[i].isAutoIncrement();
     }
 
-    @Override
-    public int getColumnScale(int i) {
-        return expressions[i].getScale();
-    }
-
     /**
      * Set the offset of the first row to return.
      *
@@ -496,31 +627,6 @@ public class LocalResult implements ResultInterface, ResultTarget {
      */
     public void setOffset(int offset) {
         this.offset = offset;
-    }
-
-    private void applyOffset() {
-        if (offset <= 0) {
-            return;
-        }
-        if (external == null) {
-            if (offset >= rows.size()) {
-                rows.clear();
-                rowCount = 0;
-            } else {
-                // avoid copying the whole array for each row
-                int remove = Math.min(offset, rows.size());
-                rows = New.arrayList(rows.subList(remove, rows.size()));
-                rowCount -= remove;
-            }
-        } else {
-            if (offset >= rowCount) {
-                rowCount = 0;
-            } else {
-                diskOffset = offset;
-                rowCount -= offset;
-            }
-        }
-        distinctRows = null;
     }
 
     @Override

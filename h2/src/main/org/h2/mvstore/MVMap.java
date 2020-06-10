@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore;
@@ -8,69 +8,110 @@ package org.h2.mvstore;
 import java.util.AbstractList;
 import java.util.AbstractMap;
 import java.util.AbstractSet;
-import java.util.HashMap;
+import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicReference;
 import org.h2.mvstore.type.DataType;
 import org.h2.mvstore.type.ObjectDataType;
-import org.h2.util.New;
 
 /**
  * A stored map.
  * <p>
- * Read operations can happen concurrently with all other
+ * All read and write operations can happen concurrently with all other
  * operations, without risk of corruption.
- * <p>
- * Write operations first read the relevant area from disk to memory
- * concurrently, and only then modify the data. The in-memory part of write
- * operations is synchronized. For scalable concurrent in-memory write
- * operations, the map should be split into multiple smaller sub-maps that are
- * then synchronized independently.
  *
  * @param <K> the key class
  * @param <V> the value class
  */
 public class MVMap<K, V> extends AbstractMap<K, V>
-        implements ConcurrentMap<K, V> {
-
+                            implements ConcurrentMap<K, V>
+{
     /**
      * The store.
      */
-    protected MVStore store;
+    public final MVStore store;
 
     /**
-     * The current root page (may not be null).
+     * Reference to the current root page.
      */
-    protected volatile Page root;
+    private final AtomicReference<RootReference<K,V>> root;
 
-    /**
-     * The version used for writing.
-     */
-    protected volatile long writeVersion;
+    private final int id;
+    private final long createVersion;
+    private final DataType<K> keyType;
+    private final DataType<V> valueType;
+    private final int keysPerPage;
+    private final boolean singleWriter;
+    private final K[] keysBuffer;
+    private final V[] valuesBuffer;
 
-    private int id;
-    private long createVersion;
-    private final DataType keyType;
-    private final DataType valueType;
-
-    private ConcurrentArrayList<Page> oldRoots =
-            new ConcurrentArrayList<Page>();
-
+    private final Object lock = new Object();
+    private volatile boolean notificationRequested;
 
     /**
      * Whether the map is closed. Volatile so we don't accidentally write to a
      * closed map in multithreaded mode.
      */
-    private volatile boolean closed;
+    private volatile  boolean closed;
     private boolean readOnly;
     private boolean isVolatile;
 
-    protected MVMap(DataType keyType, DataType valueType) {
+    /**
+     * This designates the "last stored" version for a store which was
+     * just open for the first time.
+     */
+    static final long INITIAL_VERSION = -1;
+
+
+    protected MVMap(Map<String, Object> config, DataType<K> keyType, DataType<V> valueType) {
+        this((MVStore) config.get("store"), keyType, valueType,
+                DataUtils.readHexInt(config, "id", 0),
+                DataUtils.readHexLong(config, "createVersion", 0),
+                new AtomicReference<>(),
+                ((MVStore) config.get("store")).getKeysPerPage(),
+                config.containsKey("singleWriter") && (Boolean) config.get("singleWriter")
+        );
+        setInitialRoot(createEmptyLeaf(), store.getCurrentVersion());
+    }
+
+    // constructor for cloneIt()
+    @SuppressWarnings("CopyConstructorMissesField")
+    protected MVMap(MVMap<K, V> source) {
+        this(source.store, source.keyType, source.valueType, source.id, source.createVersion,
+                new AtomicReference<>(source.root.get()), source.keysPerPage, source.singleWriter);
+    }
+
+    // meta map constructor
+    MVMap(MVStore store, DataType<K> keyType, DataType<V> valueType) {
+        this(store, keyType, valueType, 0, 0, new AtomicReference<>(), store.getKeysPerPage(), false);
+        setInitialRoot(createEmptyLeaf(), store.getCurrentVersion());
+    }
+
+    private MVMap(MVStore store, DataType<K> keyType, DataType<V> valueType, int id, long createVersion,
+            AtomicReference<RootReference<K,V>> root, int keysPerPage, boolean singleWriter) {
+        this.store = store;
+        this.id = id;
+        this.createVersion = createVersion;
         this.keyType = keyType;
         this.valueType = valueType;
+        this.root = root;
+        this.keysPerPage = keysPerPage;
+        this.keysBuffer = singleWriter ? keyType.createStorage(keysPerPage) : null;
+        this.valuesBuffer = singleWriter ? valueType.createStorage(keysPerPage) : null;
+        this.singleWriter = singleWriter;
+    }
+
+    /**
+     * Clone the current map.
+     *
+     * @return clone of this.
+     */
+    protected MVMap<K, V> cloneIt() {
+        return new MVMap<>(this);
     }
 
     /**
@@ -80,7 +121,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @return the metadata key
      */
     static String getMapRootKey(int mapId) {
-        return "root." + Integer.toHexString(mapId);
+        return DataUtils.META_ROOT + Integer.toHexString(mapId);
     }
 
     /**
@@ -90,21 +131,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @return the metadata key
      */
     static String getMapKey(int mapId) {
-        return "map." + Integer.toHexString(mapId);
-    }
-
-    /**
-     * Open this map with the given store and configuration.
-     *
-     * @param store the store
-     * @param config the configuration
-     */
-    protected void init(MVStore store, HashMap<String, Object> config) {
-        this.store = store;
-        this.id = DataUtils.readHexInt(config, "id", 0);
-        this.createVersion = DataUtils.readHexLong(config, "createVersion", 0);
-        this.writeVersion = store.getCurrentVersion();
-        this.root = Page.createEmpty(this,  -1);
+        return DataUtils.META_MAP + Integer.toHexString(mapId);
     }
 
     /**
@@ -115,85 +142,92 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @return the old value if the key existed, or null otherwise
      */
     @Override
-    @SuppressWarnings("unchecked")
-    public synchronized V put(K key, V value) {
+    public V put(K key, V value) {
         DataUtils.checkArgument(value != null, "The value may not be null");
-        beforeWrite();
-        long v = writeVersion;
-        Page p = root.copy(v);
-        p = splitRootIfNeeded(p, v);
-        Object result = put(p, v, key, value);
-        newRoot(p);
-        return (V) result;
-    }
-
-    /**
-     * Split the root page if necessary.
-     *
-     * @param p the page
-     * @param writeVersion the write version
-     * @return the new sibling
-     */
-    protected Page splitRootIfNeeded(Page p, long writeVersion) {
-        if (p.getMemory() <= store.getPageSplitSize() || p.getKeyCount() <= 1) {
-            return p;
-        }
-        int at = p.getKeyCount() / 2;
-        long totalCount = p.getTotalCount();
-        Object k = p.getKey(at);
-        Page split = p.split(at); //p把自己split后被当成左节点
-        Object[] keys = { k };
-        Page.PageReference[] children = {
-                new Page.PageReference(p, p.getPos(), p.getTotalCount()),
-                new Page.PageReference(split, split.getPos(), split.getTotalCount()),
-        };
-        p = Page.create(this, writeVersion,
-                keys, null,
-                children,
-                totalCount, 0);
-        return p;
-    }
-
-    /**
-     * Add or update a key-value pair.
-     *
-     * @param p the page
-     * @param writeVersion the write version
-     * @param key the key (may not be null)
-     * @param value the value (may not be null)
-     * @return the old value, or null
-     */
-    protected Object put(Page p, long writeVersion, Object key, Object value) {
-        int index = p.binarySearch(key);
-        if (p.isLeaf()) {
-            if (index < 0) {
-                index = -index - 1;
-                p.insertLeaf(index, key, value);
-                return null;
-            }
-            return p.setValue(index, value);
-        }
-        // p is a node
-        if (index < 0) {
-            index = -index - 1;
-        } else {
-            index++; //大于等于split key的在右边节点，所以要加1
-        }
-        Page c = p.getChildPage(index).copy(writeVersion);
-        //如果在这里发生split，可能是树叶也可能是非树叶节点
-        if (c.getMemory() > store.getPageSplitSize() && c.getKeyCount() > 1) {
-            // split on the way down
-            int at = c.getKeyCount() / 2;
-            Object k = c.getKey(at);
-            Page split = c.split(at);
-            p.setChild(index, split); //这里把右边节点替换原来的
-            p.insertNode(index, k, c); //这里把左边节点插入，把前面的往右挪，同时在keys数组中加入新的k
-            // now we are not sure where to add
-            return put(p, writeVersion, key, value);
-        }
-        Object result = put(c, writeVersion, key, value);
-        p.setChild(index, c);
-        return result;
+//<<<<<<< HEAD
+////<<<<<<< HEAD
+////        beforeWrite();
+////        long v = writeVersion;
+////        Page p = root.copy(v);
+////        p = splitRootIfNeeded(p, v);
+////        Object result = put(p, v, key, value);
+////        newRoot(p);
+////        return (V) result;
+////    }
+////
+////    /**
+////     * Split the root page if necessary.
+////     *
+////     * @param p the page
+////     * @param writeVersion the write version
+////     * @return the new sibling
+////     */
+////    protected Page splitRootIfNeeded(Page p, long writeVersion) {
+////        if (p.getMemory() <= store.getPageSplitSize() || p.getKeyCount() <= 1) {
+////            return p;
+////        }
+////        int at = p.getKeyCount() / 2;
+////        long totalCount = p.getTotalCount();
+////        Object k = p.getKey(at);
+////        Page split = p.split(at); //p把自己split后被当成左节点
+////        Object[] keys = { k };
+////        Page.PageReference[] children = {
+////                new Page.PageReference(p, p.getPos(), p.getTotalCount()),
+////                new Page.PageReference(split, split.getPos(), split.getTotalCount()),
+////        };
+////        p = Page.create(this, writeVersion,
+////                keys, null,
+////                children,
+////                totalCount, 0);
+////        return p;
+////=======
+//        return put(key, value, DecisionMaker.PUT);
+//    }
+//
+//    /**
+//     * Add or replace a key-value pair.
+//     *
+//     * @param key the key (may not be null)
+//     * @param value the value (may not be null)
+//     * @return the old value if the key existed, or null otherwise
+//     */
+////<<<<<<< HEAD
+////    protected Object put(Page p, long writeVersion, Object key, Object value) {
+////        int index = p.binarySearch(key);
+////        if (p.isLeaf()) {
+////            if (index < 0) {
+////                index = -index - 1;
+////                p.insertLeaf(index, key, value);
+////                return null;
+////            }
+////            return p.setValue(index, value);
+////        }
+////        // p is a node
+////        if (index < 0) {
+////            index = -index - 1;
+////        } else {
+////            index++; //大于等于split key的在右边节点，所以要加1
+////        }
+////        Page c = p.getChildPage(index).copy(writeVersion);
+////        //如果在这里发生split，可能是树叶也可能是非树叶节点
+////        if (c.getMemory() > store.getPageSplitSize() && c.getKeyCount() > 1) {
+////            // split on the way down
+////            int at = c.getKeyCount() / 2;
+////            Object k = c.getKey(at);
+////            Page split = c.split(at);
+////            p.setChild(index, split); //这里把右边节点替换原来的
+////            p.insertNode(index, k, c); //这里把左边节点插入，把前面的往右挪，同时在keys数组中加入新的k
+////            // now we are not sure where to add
+////            return put(p, writeVersion, key, value);
+////        }
+////        Object result = put(c, writeVersion, key, value);
+////        p.setChild(index, c);
+////        return result;
+////=======
+//    public final V put(K key, V value, DecisionMaker<? super V> decisionMaker) {
+//        return operate(key, value, decisionMaker);
+//=======
+        return operate(key, value, DecisionMaker.PUT);
     }
 
     /**
@@ -201,8 +235,18 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the first key, or null
      */
-    public K firstKey() {
+    public final K firstKey() {
         return getFirstLast(true);
+    }
+
+    /**
+     * Get the first key of this page.
+     *
+     * @param p the page
+     * @return the key, or null
+     */
+    public final K firstKey(Page<K,V> p) {
+        return getFirstLast(p, true);
     }
 
     /**
@@ -210,8 +254,18 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the last key, or null
      */
-    public K lastKey() {
+    public final K lastKey() {
         return getFirstLast(false);
+    }
+
+    /**
+     * Get the last key of this page.
+     *
+     * @param p the page
+     * @return the key, or null
+     */
+    public final K lastKey(Page<K,V> p) {
+        return getFirstLast(p, false);
     }
 
     /**
@@ -222,12 +276,11 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param index the index
      * @return the key
      */
-    @SuppressWarnings("unchecked")
-    public K getKey(long index) {
-        if (index < 0 || index >= size()) {
+    public final K getKey(long index) {
+        if (index < 0 || index >= sizeAsLong()) {
             return null;
         }
-        Page p = root;
+        Page<K,V> p = getRootPage();
         long offset = 0;
         while (true) {
             if (p.isLeaf()) {
@@ -235,7 +288,8 @@ public class MVMap<K, V> extends AbstractMap<K, V>
                 if (index >= offset + p.getKeyCount()) {
                     return null;
                 }
-                return (K) p.getKey((int) (index - offset));
+                K key = p.getKey((int) (index - offset));
+                return key;
             }
             int i = 0, size = getChildPageCount(p);
             for (; i < size; i++) {
@@ -260,7 +314,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the key list
      */
-    public List<K> keyList() {
+    public final List<K> keyList() {
         return new AbstractList<K>() {
 
             @Override
@@ -294,24 +348,22 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param key the key
      * @return the index
      */
-    public long getKeyIndex(K key) {
-        if (size() == 0) {
+    public final long getKeyIndex(K key) {
+        Page<K,V> p = getRootPage();
+        if (p.getTotalCount() == 0) {
             return -1;
         }
-        Page p = root;
         long offset = 0;
         while (true) {
             int x = p.binarySearch(key);
             if (p.isLeaf()) {
                 if (x < 0) {
-                    return -offset + x;
+                    offset = -offset;
                 }
                 return offset + x;
             }
-            if (x < 0) {
-                x = -x - 1;
-            } else {
-                x++;
+            if (x++ < 0) {
+                x = -x;
             }
             for (int i = 0; i < x; i++) {
                 offset += p.getCounts(i);
@@ -326,15 +378,18 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param first whether to retrieve the first key
      * @return the key, or null if the map is empty
      */
-    @SuppressWarnings("unchecked")
-    protected K getFirstLast(boolean first) {
-        if (size() == 0) {
+    private K getFirstLast(boolean first) {
+        Page<K,V> p = getRootPage();
+        return getFirstLast(p, first);
+    }
+
+    private K getFirstLast(Page<K,V> p, boolean first) {
+        if (p.getTotalCount() == 0) {
             return null;
         }
-        Page p = root;
         while (true) {
             if (p.isLeaf()) {
-                return (K) p.getKey(first ? 0 : p.getKeyCount() - 1);
+                return p.getKey(first ? 0 : p.getKeyCount() - 1);
             }
             p = p.getChildPage(first ? 0 : getChildPageCount(p) - 1);
         }
@@ -347,8 +402,20 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param key the key
      * @return the result
      */
-    public K higherKey(K key) {
+    public final K higherKey(K key) {
         return getMinMax(key, false, true);
+    }
+
+    /**
+     * Get the smallest key that is larger than the given key, for the given
+     * root page, or null if no such key exists.
+     *
+     * @param p the root page
+     * @param key the key
+     * @return the result
+     */
+    public final K higherKey(Page<K,V> p, K key) {
+        return getMinMax(p, key, false, true);
     }
 
     /**
@@ -357,8 +424,19 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param key the key
      * @return the result
      */
-    public K ceilingKey(K key) {
+    public final K ceilingKey(K key) {
         return getMinMax(key, false, false);
+    }
+
+    /**
+     * Get the smallest key that is larger or equal to this key, for the given root page.
+     *
+     * @param p the root page
+     * @param key the key
+     * @return the result
+     */
+    public final K ceilingKey(Page<K,V> p, K key) {
+        return getMinMax(p, key, false, false);
     }
 
     /**
@@ -367,8 +445,19 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param key the key
      * @return the result
      */
-    public K floorKey(K key) {
+    public final K floorKey(K key) {
         return getMinMax(key, true, false);
+    }
+
+    /**
+     * Get the largest key that is smaller or equal to this key, for the given root page.
+     *
+     * @param p the root page
+     * @param key the key
+     * @return the result
+     */
+    public final K floorKey(Page<K,V> p, K key) {
+        return getMinMax(p, key, true, false);
     }
 
     /**
@@ -378,8 +467,20 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param key the key
      * @return the result
      */
-    public K lowerKey(K key) {
+    public final K lowerKey(K key) {
         return getMinMax(key, true, true);
+    }
+
+    /**
+     * Get the largest key that is smaller than the given key, for the given
+     * root page, or null if no such key exists.
+     *
+     * @param p the root page
+     * @param key the key
+     * @return the result
+     */
+    public final K lowerKey(Page<K,V> p, K key) {
+        return getMinMax(p, key, true, true);
     }
 
     /**
@@ -390,14 +491,13 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param excluding if the given upper/lower bound is exclusive
      * @return the key, or null if no such key exists
      */
-    protected K getMinMax(K key, boolean min, boolean excluding) {
-        return getMinMax(root, key, min, excluding);
+    private K getMinMax(K key, boolean min, boolean excluding) {
+        return getMinMax(getRootPage(), key, min, excluding);
     }
 
-    @SuppressWarnings("unchecked")
-    private K getMinMax(Page p, K key, boolean min, boolean excluding) {
+    private K getMinMax(Page<K,V> p, K key, boolean min, boolean excluding) {
+        int x = p.binarySearch(key);
         if (p.isLeaf()) {
-            int x = p.binarySearch(key);
             if (x < 0) {
                 x = -x - (min ? 2 : 1);
             } else if (excluding) {
@@ -406,13 +506,10 @@ public class MVMap<K, V> extends AbstractMap<K, V>
             if (x < 0 || x >= p.getKeyCount()) {
                 return null;
             }
-            return (K) p.getKey(x);
+            return p.getKey(x);
         }
-        int x = p.binarySearch(key);
-        if (x < 0) {
-            x = -x - 1;
-        } else {
-            x++;
+        if (x++ < 0) {
+            x = -x;
         }
         while (true) {
             if (x < 0 || x >= getChildPageCount(p)) {
@@ -428,43 +525,36 @@ public class MVMap<K, V> extends AbstractMap<K, V>
 
 
     /**
-     * Get a value.
+     * Get the value for the given key, or null if not found.
      *
      * @param key the key
      * @return the value, or null if not found
+     * @throws ClassCastException if type of the specified key is not compatible with this map
      */
-    @Override
     @SuppressWarnings("unchecked")
-    public V get(Object key) {
-        return (V) binarySearch(root, key);
+    @Override
+    public final V get(Object key) {
+        return getIt((K)key);
+    }
+
+    public final V getIt(K key) {
+        return get(getRootPage(), key);
     }
 
     /**
-     * Get the value for the given key, or null if not found.
+     * Get the value for the given key from a snapshot, or null if not found.
      *
-     * @param p the page
+     * @param p the root of a snapshot
      * @param key the key
-     * @return the value or null
+     * @return the value, or null if not found
+     * @throws ClassCastException if type of the specified key is not compatible with this map
      */
-    protected Object binarySearch(Page p, Object key) {
-        int x = p.binarySearch(key);
-        if (!p.isLeaf()) {
-            if (x < 0) {
-                x = -x - 1;
-            } else {
-                x++;
-            }
-            p = p.getChildPage(x);
-            return binarySearch(p, key);
-        }
-        if (x >= 0) {
-            return p.getValue(x);
-        }
-        return null;
+    public V get(Page<K,V> p, K key) {
+        return Page.get(p, key);
     }
 
     @Override
-    public boolean containsKey(Object key) {
+    public final boolean containsKey(Object key) {
         return get(key) != null;
     }
 
@@ -472,21 +562,61 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * Remove all entries.
      */
     @Override
-    public synchronized void clear() {
-        beforeWrite();
-        root.removeAllRecursive();
-        newRoot(Page.createEmpty(this, writeVersion));
+    public void clear() {
+        clearIt();
+    }
+
+    /**
+     * Remove all entries and return the root reference.
+     *
+     * @return the new root reference
+     */
+    RootReference<K,V> clearIt() {
+        Page<K,V> emptyRootPage = createEmptyLeaf();
+        int attempt = 0;
+        while (true) {
+            RootReference<K,V> rootReference = flushAndGetRoot();
+            if (rootReference.getTotalCount() == 0) {
+                return rootReference;
+            }
+            boolean locked = rootReference.isLockedByCurrentThread();
+            if (!locked) {
+                if (attempt++ == 0) {
+                    beforeWrite();
+                } else if (attempt > 3 || rootReference.isLocked()) {
+                    rootReference = lockRoot(rootReference, attempt);
+                    locked = true;
+                }
+            }
+            Page<K,V> rootPage = rootReference.root;
+            long version = rootReference.version;
+            try {
+                if (!locked) {
+                    rootReference = rootReference.updateRootPage(emptyRootPage, attempt);
+                    if (rootReference == null) {
+                        continue;
+                    }
+                }
+                store.registerUnsavedMemory(rootPage.removeAllRecursive(version));
+                rootPage = emptyRootPage;
+                return rootReference;
+            } finally {
+                if(locked) {
+                    unlockRoot(rootPage);
+                }
+            }
+        }
     }
 
     /**
      * Close the map. Accessing the data is still possible (to allow concurrent
      * reads), but it is marked as closed.
      */
-    void close() {
+    final void close() {
         closed = true;
     }
 
-    public boolean isClosed() {
+    public final boolean isClosed() {
         return closed;
     }
 
@@ -495,26 +625,12 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @param key the key (may not be null)
      * @return the old value if the key existed, or null otherwise
+     * @throws ClassCastException if type of the specified key is not compatible with this map
      */
     @Override
     @SuppressWarnings("unchecked")
     public V remove(Object key) {
-        beforeWrite();
-        V result = get(key);
-        if (result == null) {
-            return null;
-        }
-        long v = writeVersion;
-        synchronized (this) {
-            Page p = root.copy(v);
-            result = (V) remove(p, v, key);
-            if (!p.isLeaf() && p.getTotalCount() == 0) {
-                p.removePage();
-                p = Page.createEmpty(this,  p.getVersion());
-            }
-            newRoot(p);
-        }
-        return result;
+        return operate((K)key, null, DecisionMaker.REMOVE);
     }
 
     /**
@@ -525,12 +641,8 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @return the old value if the key existed, or null otherwise
      */
     @Override
-    public synchronized V putIfAbsent(K key, V value) {
-        V old = get(key);
-        if (old == null) {
-            put(key, value);
-        }
-        return old;
+    public final V putIfAbsent(K key, V value) {
+        return operate(key, value, DecisionMaker.IF_ABSENT);
     }
 
     /**
@@ -540,14 +652,12 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param value the expected value
      * @return true if the item was removed
      */
+    @SuppressWarnings("unchecked")
     @Override
-    public synchronized boolean remove(Object key, Object value) {
-        V old = get(key);
-        if (areValuesEqual(old, value)) {
-            remove(key);
-            return true;
-        }
-        return false;
+    public boolean remove(Object key, Object value) {
+        EqualsDecisionMaker<V> decisionMaker = new EqualsDecisionMaker<>(valueType, (V)value);
+        operate((K)key, null, decisionMaker);
+        return decisionMaker.getDecision() != Decision.ABORT;
     }
 
     /**
@@ -555,15 +665,12 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @param a the first value
      * @param b the second value
+     * @param datatype to use for comparison
      * @return true if they are equal
      */
-    public boolean areValuesEqual(Object a, Object b) {
-        if (a == b) {
-            return true;
-        } else if (a == null || b == null) {
-            return false;
-        }
-        return valueType.compare(a, b) == 0;
+    static <X> boolean areValuesEqual(DataType<X> datatype, X a, X b) {
+        return a == b
+            || a != null && b != null && datatype.compare(a, b) == 0;
     }
 
     /**
@@ -575,13 +682,20 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @return true if the value was replaced
      */
     @Override
-    public synchronized boolean replace(K key, V oldValue, V newValue) {
-        V old = get(key);
-        if (areValuesEqual(old, oldValue)) {
-            put(key, newValue);
-            return true;
-        }
-        return false;
+    public final boolean replace(K key, V oldValue, V newValue) {
+        EqualsDecisionMaker<V> decisionMaker = new EqualsDecisionMaker<>(valueType, oldValue);
+        V result = operate(key, newValue, decisionMaker);
+        boolean res = decisionMaker.getDecision() != Decision.ABORT;
+        assert !res || areValuesEqual(valueType, oldValue, result) : oldValue + " != " + result;
+        return res;
+    }
+
+    private boolean rewrite(K key) {
+        ContainsDecisionMaker<V> decisionMaker = new ContainsDecisionMaker<>();
+        V result = operate(key, null, decisionMaker);
+        boolean res = decisionMaker.getDecision() != Decision.ABORT;
+        assert res == (result != null);
+        return res;
     }
 
     /**
@@ -592,74 +706,8 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @return the old value, if the value was replaced, or null
      */
     @Override
-    public synchronized V replace(K key, V value) {
-        V old = get(key);
-        if (old != null) {
-            put(key, value);
-            return old;
-        }
-        return null;
-    }
-
-    /**
-     * Remove a key-value pair.
-     *
-     * @param p the page (may not be null)
-     * @param writeVersion the write version
-     * @param key the key
-     * @return the old value, or null if the key did not exist
-     */
-    protected Object remove(Page p, long writeVersion, Object key) {
-        int index = p.binarySearch(key);
-        Object result = null;
-        if (p.isLeaf()) {
-            if (index >= 0) {
-                result = p.getValue(index);
-                p.remove(index);
-            }
-            return result;
-        }
-        // node
-        if (index < 0) {
-            index = -index - 1;
-        } else {
-            index++;
-        }
-        Page cOld = p.getChildPage(index);
-        Page c = cOld.copy(writeVersion);
-        result = remove(c, writeVersion, key);
-        if (result == null || c.getTotalCount() != 0) {
-            // no change, or
-            // there are more nodes
-            p.setChild(index, c);
-        } else {
-            // this child was deleted
-            if (p.getKeyCount() == 0) {
-                p.setChild(index, c);
-                c.removePage(); //直接删除最后一个子节点，父节点在remove(Object)那里删除
-            } else {
-                p.remove(index); //删除没有记录的子节点
-            }
-        }
-        return result;
-    }
-
-    /**
-     * Use the new root page from now on.
-     *
-     * @param newRoot the new root page
-     */
-    protected void newRoot(Page newRoot) {
-        if (root != newRoot) {
-            removeUnusedOldVersions();
-            if (root.getVersion() != newRoot.getVersion()) {
-                Page last = oldRoots.peekLast();
-                if (last == null || last.getVersion() != root.getVersion()) {
-                    oldRoots.add(root);
-                }
-            }
-            root = newRoot;
-        }
+    public final V replace(K key, V value) {
+        return operate(key, value, DecisionMaker.IF_PRESENT);
     }
 
     /**
@@ -669,7 +717,8 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param b the second key
      * @return -1 if the first key is smaller, 1 if bigger, 0 if equal
      */
-    int compare(Object a, Object b) {
+    @SuppressWarnings("unused")
+    final int compare(K a, K b) {
         return keyType.compare(a, b);
     }
 
@@ -678,7 +727,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the key type
      */
-    public DataType getKeyType() {
+    public final DataType<K> getKeyType() {
         return keyType;
     }
 
@@ -687,8 +736,12 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the value type
      */
-    public DataType getValueType() {
+    public final DataType<V> getValueType() {
         return valueType;
+    }
+
+    boolean isSingleWriter() {
+        return singleWriter;
     }
 
     /**
@@ -697,19 +750,25 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param pos the position of the page
      * @return the page
      */
-    Page readPage(long pos) {
+    final Page<K,V> readPage(long pos) {
         return store.readPage(this, pos);
     }
 
     /**
      * Set the position of the root page.
-     *
      * @param rootPos the position, 0 for empty
-     * @param version the version of the root
+     * @param version to set for this map
+     *
      */
-    void setRootPos(long rootPos, long version) {
-        root = rootPos == 0 ? Page.createEmpty(this, -1) : readPage(rootPos);
-        root.setVersion(version);
+    final void setRootPos(long rootPos, long version) {
+        Page<K,V> root = readOrCreateRootPage(rootPos);
+        setInitialRoot(root, version);
+        setWriteVersion(store.getCurrentVersion());
+    }
+
+    private Page<K,V> readOrCreateRootPage(long rootPos) {
+        Page<K,V> root = rootPos == 0 ? createEmptyLeaf() : readPage(rootPos);
+        return root;
     }
 
     /**
@@ -718,60 +777,43 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param from the first key to return
      * @return the iterator
      */
-    public Iterator<K> keyIterator(K from) {
-        return new Cursor<K, V>(this, root, from);
+    public final Iterator<K> keyIterator(K from) {
+        return new Cursor<>(getRootPage(), from);
     }
 
     /**
      * Re-write any pages that belong to one of the chunks in the given set.
      *
      * @param set the set of chunk ids
-     * @return whether rewriting was successful
+     * @return number of pages actually re-written
      */
-    boolean rewrite(Set<Integer> set) {
-        // read from old version, to avoid concurrent reads
-        long previousVersion = store.getCurrentVersion() - 1;
-        if (previousVersion < createVersion) {
-            // a new map
-            return true;
+    final int rewrite(Set<Integer> set) {
+        if (!singleWriter) {
+            return rewrite(getRootPage(), set);
         }
-        MVMap<K, V> readMap;
+        RootReference<K,V> rootReference = lockRoot(getRoot(), 1);
+        int appendCounter = rootReference.getAppendCounter();
         try {
-            readMap = openVersion(previousVersion);
-        } catch (IllegalArgumentException e) {
-            // unknown version: ok
-            // TODO should not rely on exception handling
-            return true;
-        }
-        try {
-            rewrite(readMap.root, set);
-            return true;
-        } catch (IllegalStateException e) {
-            // TODO should not rely on exception handling
-            if (DataUtils.getErrorCode(e.getMessage()) == DataUtils.ERROR_CHUNK_NOT_FOUND) {
-                // ignore
-                return false;
+            if (appendCounter > 0) {
+                rootReference = flushAppendBuffer(rootReference, true);
+                assert rootReference.getAppendCounter() == 0;
             }
-            throw e;
+            int res = rewrite(rootReference.root, set);
+            return res;
+        } finally {
+            unlockRoot();
         }
     }
 
-    private int rewrite(Page p, Set<Integer> set) {
+    private int rewrite(Page<K,V> p, Set<Integer> set) {
         if (p.isLeaf()) {
             long pos = p.getPos();
             int chunkId = DataUtils.getPageChunkId(pos);
             if (!set.contains(chunkId)) {
                 return 0;
             }
-            if (p.getKeyCount() > 0) {
-                @SuppressWarnings("unchecked")
-                K key = (K) p.getKey(0);
-                V value = get(key);
-                if (value != null) {
-                    replace(key, value, value);
-                }
-            }
-            return 1;
+            assert p.getKeyCount() > 0;
+            return rewritePage(p) ? 1 : 0;
         }
         int writtenPageCount = 0;
         for (int i = 0; i < getChildPageCount(p); i++) {
@@ -797,20 +839,27 @@ public class MVMap<K, V> extends AbstractMap<K, V>
                 // (this is not needed if anyway one of the children
                 // was changed, as this would have updated this
                 // page as well)
-                Page p2 = p;
-                while (!p2.isLeaf()) {
-                    p2 = p2.getChildPage(0);
+                while (!p.isLeaf()) {
+                    p = p.getChildPage(0);
                 }
-                @SuppressWarnings("unchecked")
-                K key = (K) p2.getKey(0);
-                V value = get(key);
-                if (value != null) {
-                    replace(key, value, value);
+                if (rewritePage(p)) {
+                    writtenPageCount = 1;
                 }
-                writtenPageCount++;
             }
         }
         return writtenPageCount;
+    }
+
+    private boolean rewritePage(Page<K,V> p) {
+        if (p.getKeyCount()==0) {
+            return true;
+        }
+
+        K key = p.getKey(0);
+        if (!isClosed()) {
+            return rewrite(key);
+        }
+        return true;
     }
 
     /**
@@ -819,19 +868,18 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param from the first key to return
      * @return the cursor
      */
-    public Cursor<K, V> cursor(K from) {
-        return new Cursor<K, V>(this, root, from);
+    public final Cursor<K, V> cursor(K from) {
+        return new Cursor<>(getRootPage(), from);
     }
 
     @Override
-    public Set<Map.Entry<K, V>> entrySet() {
-        final MVMap<K, V> map = this;
-        final Page root = this.root;
+    public final Set<Map.Entry<K, V>> entrySet() {
+        final Page<K,V> root = this.getRootPage();
         return new AbstractSet<Entry<K, V>>() {
 
             @Override
             public Iterator<Entry<K, V>> iterator() {
-                final Cursor<K, V> cursor = new Cursor<K, V>(map, root, null);
+                final Cursor<K, V> cursor = new Cursor<>(root, null);
                 return new Iterator<Entry<K, V>>() {
 
                     @Override
@@ -842,13 +890,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
                     @Override
                     public Entry<K, V> next() {
                         K k = cursor.next();
-                        return new DataUtils.MapEntry<K, V>(k, cursor.getValue());
-                    }
-
-                    @Override
-                    public void remove() {
-                        throw DataUtils.newUnsupportedOperationException(
-                                "Removing is not supported");
+                        return new SimpleImmutableEntry<>(k, cursor.getValue());
                     }
                 };
 
@@ -870,13 +912,12 @@ public class MVMap<K, V> extends AbstractMap<K, V>
 
     @Override
     public Set<K> keySet() {
-        final MVMap<K, V> map = this;
-        final Page root = this.root;
+        final Page<K,V> root = getRootPage();
         return new AbstractSet<K>() {
 
             @Override
             public Iterator<K> iterator() {
-                return new Cursor<K, V>(map, root, null);
+                return new Cursor<>(root, null);
             }
 
             @Override
@@ -893,25 +934,20 @@ public class MVMap<K, V> extends AbstractMap<K, V>
     }
 
     /**
-     * Get the root page.
-     *
-     * @return the root page
-     */
-    public Page getRoot() {
-        return root;
-    }
-
-    /**
      * Get the map name.
      *
      * @return the name
      */
-    public String getName() {
+    public final String getName() {
         return store.getMapName(id);
     }
 
-    public MVStore getStore() {
+    public final MVStore getStore() {
         return store;
+    }
+
+    protected final boolean isPersistent() {
+        return store.getFileStore() != null && !isVolatile;
     }
 
     /**
@@ -920,8 +956,56 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the map id
      */
-    public int getId() {
+    public final int getId() {
         return id;
+    }
+
+    /**
+     * The current root page (may not be null).
+     *
+     * @return the root page
+     */
+    public final Page<K,V> getRootPage() {
+        return flushAndGetRoot().root;
+    }
+
+    public RootReference<K,V> getRoot() {
+        return root.get();
+    }
+
+    /**
+     * Get the root reference, flushing any current append buffer.
+     *
+     * @return current root reference
+     */
+    public RootReference<K,V> flushAndGetRoot() {
+        RootReference<K,V> rootReference = getRoot();
+        if (singleWriter && rootReference.getAppendCounter() > 0) {
+            return flushAppendBuffer(rootReference, true);
+        }
+        return rootReference;
+    }
+
+    /**
+     * Set the initial root.
+     *
+     * @param rootPage root page
+     * @param version initial version
+     */
+    final void setInitialRoot(Page<K,V> rootPage, long version) {
+        root.set(new RootReference<>(rootPage, version));
+    }
+
+    /**
+     * Compare and set the root reference.
+     *
+     * @param expectedRootReference the old (expected)
+     * @param updatedRootReference the new
+     * @return whether updating worked
+     */
+    final boolean compareAndSetRoot(RootReference<K,V> expectedRootReference, RootReference<K,V> updatedRootReference)
+    {
+        return root.compareAndSet(expectedRootReference, updatedRootReference);
     }
 
     /**
@@ -929,47 +1013,72 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @param version the version
      */
-    void rollbackTo(long version) {
-        beforeWrite();
-        if (version <= createVersion) {
-            // the map is removed later
-        } else if (root.getVersion() >= version) {
-            while (true) {
-                Page last = oldRoots.peekLast();
-                if (last == null) {
-                    break;
-                }
-                // slow, but rollback is not a common operation
-                oldRoots.removeLast(last);
-                root = last;
-                if (root.getVersion() < version) {
-                    break;
-                }
-            }
+    final void rollbackTo(long version) {
+        // check if the map was removed and re-created later ?
+        if (version > createVersion) {
+            rollbackRoot(version);
         }
     }
 
     /**
-     * Forget those old versions that are no longer needed.
+     * Roll the root back to the specified version.
+     *
+     * @param version to rollback to
+     * @return true if rollback was a success, false if there was not enough in-memory history
      */
-    void removeUnusedOldVersions() {
-        //如果只保留3个版本，假设前面已经有5个版本了，版本号是1-5，
-        //如果当前版本号是6，那么oldest的值就是4，版本号小于4的OldRoot都要删除
-        long oldest = store.getOldestVersionToKeep();
-        if (oldest == -1) {
-            return;
-        }
-        Page last = oldRoots.peekLast(); //后面的是最近加入的
-        while (true) {
-            Page p = oldRoots.peekFirst();
-            if (p == null || p.getVersion() >= oldest || p == last) {
-                break;
+    boolean rollbackRoot(long version)
+    {
+        RootReference<K,V> rootReference = flushAndGetRoot();
+        RootReference<K,V> previous;
+        while (rootReference.version >= version && (previous = rootReference.previous) != null) {
+            if (root.compareAndSet(rootReference, previous)) {
+                rootReference = previous;
+                closed = false;
             }
-            oldRoots.removeFirst(p);
         }
+        setWriteVersion(version);
+        return rootReference.version < version;
     }
 
-    public boolean isReadOnly() {
+    /**
+     * Use the new root page from now on.
+     * @param expectedRootReference expected current root reference
+     * @param newRootPage the new root page
+     * @param attemptUpdateCounter how many attempt (including current)
+     *                             were made to update root
+     * @return new RootReference or null if update failed
+     */
+    protected static <K,V> boolean updateRoot(RootReference<K,V> expectedRootReference, Page<K,V> newRootPage,
+            int attemptUpdateCounter) {
+        return expectedRootReference.updateRootPage(newRootPage, attemptUpdateCounter) != null;
+    }
+
+    /**
+     * Forget those old versions that are no longer needed.
+     * @param rootReference to inspect
+     */
+//<<<<<<< HEAD
+////<<<<<<< HEAD
+////    void removeUnusedOldVersions() {
+////        //如果只保留3个版本，假设前面已经有5个版本了，版本号是1-5，
+////        //如果当前版本号是6，那么oldest的值就是4，版本号小于4的OldRoot都要删除
+////        long oldest = store.getOldestVersionToKeep();
+////        if (oldest == -1) {
+////            return;
+////        }
+////        Page last = oldRoots.peekLast(); //后面的是最近加入的
+////        while (true) {
+////            Page p = oldRoots.peekFirst();
+////            if (p == null || p.getVersion() >= oldest || p == last) {
+////                break;
+////=======
+//    private void removeUnusedOldVersions(RootReference rootReference) {
+//=======
+    private void removeUnusedOldVersions(RootReference<K,V> rootReference) {
+        rootReference.removeUnusedOldVersions(store.getOldestVersionToKeep());
+    }
+
+    public final boolean isReadOnly() {
         return readOnly;
     }
 
@@ -978,7 +1087,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @param isVolatile the volatile flag
      */
-    public void setVolatile(boolean isVolatile) {
+    public final void setVolatile(boolean isVolatile) {
         this.isVolatile = isVolatile;
     }
 
@@ -989,7 +1098,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return whether this map is volatile
      */
-    public boolean isVolatile() {
+    public final boolean isVolatile() {
         return isVolatile;
     }
 
@@ -1001,10 +1110,13 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @throws UnsupportedOperationException if the map is read-only,
      *      or if another thread is concurrently writing
      */
-    protected void beforeWrite() {
+    protected final void beforeWrite() {
+        assert !getRoot().isLockedByCurrentThread() : getRoot();
         if (closed) {
+            int id = getId();
+            String mapName = store.getMapName(id);
             throw DataUtils.newIllegalStateException(
-                    DataUtils.ERROR_CLOSED, "This map is closed");
+                    DataUtils.ERROR_CLOSED, "Map {0}({1}) is closed. {2}", mapName, id, store.getPanicException());
         }
         if (readOnly) {
             throw DataUtils.newUnsupportedOperationException(
@@ -1014,23 +1126,24 @@ public class MVMap<K, V> extends AbstractMap<K, V>
     }
 
     @Override
-    public int hashCode() {
+    public final int hashCode() {
         return id;
     }
 
     @Override
-    public boolean equals(Object o) {
+    public final boolean equals(Object o) {
         return this == o;
     }
 
     /**
-     * Get the number of entries, as a integer. Integer.MAX_VALUE is returned if
-     * there are more than this entries.
+     * Get the number of entries, as a integer. {@link Integer#MAX_VALUE} is
+     * returned if there are more than this entries.
      *
      * @return the number of entries, as an integer
+     * @see #sizeAsLong()
      */
     @Override
-    public int size() {
+    public final int size() {
         long size = sizeAsLong();
         return size > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) size;
     }
@@ -1040,37 +1153,29 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @return the number of entries
      */
-    public long sizeAsLong() {
-        return root.getTotalCount();
+    public final long sizeAsLong() {
+        return getRoot().getTotalCount();
     }
 
     @Override
     public boolean isEmpty() {
-        // could also use (sizeAsLong() == 0)
-        return root.isLeaf() && root.getKeyCount() == 0;
+        return sizeAsLong() == 0;
     }
 
-    public long getCreateVersion() {
+    final long getCreateVersion() {
         return createVersion;
     }
 
     /**
-     * Remove the given page (make the space available).
-     *
-     * @param pos the position of the page to remove
-     * @param memory the number of bytes used for this page
-     */
-    protected void removePage(long pos, int memory) {
-        store.removePage(this, pos, memory);
-    }
-
-    /**
      * Open an old version for the given map.
+     * It will restore map at last known state of the version specified.
+     * (at the point right before the commit() call, which advanced map to the next version)
+     * Map is opened in read-only mode.
      *
      * @param version the version
      * @return the map
      */
-    public MVMap<K, V> openVersion(long version) {
+    public final MVMap<K, V> openVersion(long version) {
         if (readOnly) {
             throw DataUtils.newUnsupportedOperationException(
                     "This map is read-only; need to call " +
@@ -1079,54 +1184,57 @@ public class MVMap<K, V> extends AbstractMap<K, V>
         DataUtils.checkArgument(version >= createVersion,
                 "Unknown version {0}; this map was created in version is {1}",
                 version, createVersion);
-        Page newest = null;
-        // need to copy because it can change
-        Page r = root;
-        if (version >= r.getVersion() &&
-                (version == writeVersion ||
-                r.getVersion() >= 0 ||
-                version <= createVersion ||
-                store.getFileStore() == null)) {
-            newest = r;
-        } else {
-            Page last = oldRoots.peekFirst();
-            if (last == null || version < last.getVersion()) {
-                // smaller than all in-memory versions
-                return store.openMapVersion(version, id, this);
-            }
-            Iterator<Page> it = oldRoots.iterator();
-            while (it.hasNext()) {
-                Page p = it.next();
-                if (p.getVersion() > version) {
-                    break;
-                }
-                last = p;
-            }
-            newest = last;
+        RootReference<K,V> rootReference = flushAndGetRoot();
+        removeUnusedOldVersions(rootReference);
+        RootReference<K,V> previous;
+        while ((previous = rootReference.previous) != null && previous.version >= version) {
+            rootReference = previous;
         }
-        MVMap<K, V> m = openReadOnly();
-        m.root = newest;
+        if (previous == null && version < store.getOldestVersionToKeep()) {
+            throw DataUtils.newIllegalArgumentException("Unknown version {0}", version);
+        }
+        MVMap<K, V> m = openReadOnly(rootReference.root, version);
+        assert m.getVersion() <= version : m.getVersion() + " <= " + version;
         return m;
     }
 
     /**
      * Open a copy of the map in read-only mode.
      *
+     * @param rootPos position of the root page
+     * @param version to open
      * @return the opened map
      */
-    MVMap<K, V> openReadOnly() {
-        MVMap<K, V> m = new MVMap<K, V>(keyType, valueType);
+    final MVMap<K, V> openReadOnly(long rootPos, long version) {
+        Page<K,V> root = readOrCreateRootPage(rootPos);
+        return openReadOnly(root, version);
+    }
+
+    private MVMap<K, V> openReadOnly(Page<K,V> root, long version) {
+        MVMap<K, V> m = cloneIt();
         m.readOnly = true;
-        HashMap<String, Object> config = New.hashMap();
-        config.put("id", id);
-        config.put("createVersion", createVersion);
-        m.init(store, config);
-        m.root = root;
+        m.setInitialRoot(root, version);
         return m;
     }
 
-    public long getVersion() {
-        return root.getVersion();
+    /**
+     * Get version of the map, which is the version of the store,
+     * at the moment when map was modified last time.
+     *
+     * @return version
+     */
+    public final long getVersion() {
+        return getRoot().getVersion();
+    }
+
+    /**
+     * Does the root have changes since the specified version?
+     *
+     * @param version root version
+     * @return true if has changes
+     */
+    final boolean hasChangesSince(long version) {
+        return getRoot().hasChangesSince(version);
     }
 
     /**
@@ -1137,7 +1245,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param p the page
      * @return the number of direct children
      */
-    protected int getChildPageCount(Page p) {
+    protected int getChildPageCount(Page<K,V> p) {
         return p.getRawChildPageCount();
     }
 
@@ -1156,7 +1264,7 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param name the map name (or null)
      * @return the string
      */
-    String asString(String name) {
+    protected String asString(String name) {
         StringBuilder buff = new StringBuilder();
         if (name != null) {
             DataUtils.appendMap(buff, "name", name);
@@ -1171,8 +1279,58 @@ public class MVMap<K, V> extends AbstractMap<K, V>
         return buff.toString();
     }
 
-    void setWriteVersion(long writeVersion) {
-        this.writeVersion = writeVersion;
+    final RootReference<K,V> setWriteVersion(long writeVersion) {
+        int attempt = 0;
+        while(true) {
+            RootReference<K,V> rootReference = flushAndGetRoot();
+            if(rootReference.version >= writeVersion) {
+                return rootReference;
+            } else if (isClosed()) {
+                // map was closed a while back and can not possibly be in use by now
+                // it's time to remove it completely from the store (it was anonymous already)
+                if (rootReference.getVersion() + 1 < store.getOldestVersionToKeep()) {
+                    store.deregisterMapRoot(id);
+                    return null;
+                }
+            }
+
+            RootReference<K,V> lockedRootReference = null;
+            if (++attempt > 3 || rootReference.isLocked()) {
+                lockedRootReference = lockRoot(rootReference, attempt);
+                rootReference = flushAndGetRoot();
+            }
+
+            try {
+                rootReference = rootReference.tryUnlockAndUpdateVersion(writeVersion, attempt);
+                if (rootReference != null) {
+                    lockedRootReference = null;
+                    removeUnusedOldVersions(rootReference);
+                    return rootReference;
+                }
+            } finally {
+                if (lockedRootReference != null) {
+                    unlockRoot();
+                }
+            }
+        }
+    }
+
+    /**
+     * Create empty leaf node page.
+     *
+     * @return new page
+     */
+    protected Page<K,V> createEmptyLeaf() {
+        return Page.createEmptyLeaf(this);
+    }
+
+    /**
+     * Create empty internal node page.
+     *
+     * @return new page
+     */
+    protected Page<K,V> createEmptyNode() {
+        return Page.createEmptyNode(this);
     }
 
     /**
@@ -1180,48 +1338,256 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      *
      * @param sourceMap the source map
      */
-    void copyFrom(MVMap<K, V> sourceMap) {
-        beforeWrite();
-        newRoot(copy(sourceMap.root, null));
+    final void copyFrom(MVMap<K, V> sourceMap) {
+        MVStore.TxCounter txCounter = store.registerVersionUsage();
+        try {
+            beforeWrite();
+            copy(sourceMap.getRootPage(), null, 0);
+        } finally {
+            store.deregisterVersionUsage(txCounter);
+        }
     }
 
-    private Page copy(Page source, CursorPos parent) {
-        Page target = Page.create(this, writeVersion, source);
-        if (source.isLeaf()) {
-            Page child = target;
-            for (CursorPos p = parent; p != null; p = p.parent) {
-                p.page.setChild(p.index, child);
-                p.page = p.page.copy(writeVersion);
-                child = p.page;
-                if (p.parent == null) {
-                    newRoot(p.page);
-                    beforeWrite();
-                }
-            }
+    private void copy(Page<K,V> source, Page<K,V> parent, int index) {
+        Page<K,V> target = source.copy(this);
+        if (parent == null) {
+            setInitialRoot(target, INITIAL_VERSION);
         } else {
-            // temporarily, replace child pages with empty pages,
-            // to ensure there are no links to the old store
+            parent.setChild(index, target);
+        }
+        if (!source.isLeaf()) {
             for (int i = 0; i < getChildPageCount(target); i++) {
-                target.setChild(i, null);
-            }
-            CursorPos pos = new CursorPos(target, 0, parent);
-            for (int i = 0; i < getChildPageCount(target); i++) {
-                pos.index = i;
-                long p = source.getChildPagePos(i);
-                if (p != 0) {
-                    // p == 0 means no child
+                if (source.getChildPagePos(i) != 0) {
+                    // position 0 means no child
                     // (for example the last entry of an r-tree node)
                     // (the MVMap is also used for r-trees for compacting)
-                    copy(source.getChildPage(i), pos);
+                    copy(source.getChildPage(i), target, i);
                 }
             }
-            target = pos.page;
+            target.setComplete();
         }
-        return target;
+        store.registerUnsavedMemory(target.getMemory());
+        if (store.isSaveNeeded()) {
+            store.commit();
+        }
+    }
+
+    /**
+     * If map was used in append mode, this method will ensure that append buffer
+     * is flushed - emptied with all entries inserted into map as a new leaf.
+     * @param rootReference current RootReference
+     * @param fullFlush whether buffer should be completely flushed,
+     *                 otherwise just a single empty slot is required
+     * @return potentially updated RootReference
+     */
+    private RootReference<K,V> flushAppendBuffer(RootReference<K,V> rootReference, boolean fullFlush) {
+        boolean preLocked = rootReference.isLockedByCurrentThread();
+        boolean locked = preLocked;
+        int keysPerPage = store.getKeysPerPage();
+        try {
+            IntValueHolder unsavedMemoryHolder = new IntValueHolder();
+            int attempt = 0;
+            int keyCount;
+            int availabilityThreshold = fullFlush ? 0 : keysPerPage - 1;
+            while ((keyCount = rootReference.getAppendCounter()) > availabilityThreshold) {
+                if (!locked) {
+                    // instead of just calling lockRoot() we loop here and check if someone else
+                    // already flushed the buffer, then we don't need a lock
+                    rootReference = tryLock(rootReference, ++attempt);
+                    if (rootReference == null) {
+                        rootReference = getRoot();
+                        continue;
+                    }
+                    locked = true;
+                }
+
+                Page<K,V> rootPage = rootReference.root;
+                long version = rootReference.version;
+                CursorPos<K,V> pos = rootPage.getAppendCursorPos(null);
+                assert pos != null;
+                assert pos.index < 0 : pos.index;
+                int index = -pos.index - 1;
+                assert index == pos.page.getKeyCount() : index + " != " + pos.page.getKeyCount();
+                Page<K,V> p = pos.page;
+                CursorPos<K,V> tip = pos;
+                pos = pos.parent;
+
+                int remainingBuffer = 0;
+                Page<K,V> page = null;
+                int available = keysPerPage - p.getKeyCount();
+                if (available > 0) {
+                    p = p.copy();
+                    if (keyCount <= available) {
+                        p.expand(keyCount, keysBuffer, valuesBuffer);
+                    } else {
+                        p.expand(available, keysBuffer, valuesBuffer);
+                        keyCount -= available;
+                        if (fullFlush) {
+                            K[] keys = p.createKeyStorage(keyCount);
+                            V[] values = p.createValueStorage(keyCount);
+                            System.arraycopy(keysBuffer, available, keys, 0, keyCount);
+                            System.arraycopy(valuesBuffer, available, values, 0, keyCount);
+                            page = Page.createLeaf(this, keys, values, 0);
+                        } else {
+                            System.arraycopy(keysBuffer, available, keysBuffer, 0, keyCount);
+                            System.arraycopy(valuesBuffer, available, valuesBuffer, 0, keyCount);
+                            remainingBuffer = keyCount;
+                        }
+                    }
+                } else {
+                    tip = tip.parent;
+                    page = Page.createLeaf(this,
+                            Arrays.copyOf(keysBuffer, keyCount),
+                            Arrays.copyOf(valuesBuffer, keyCount),
+                            0);
+                }
+
+                unsavedMemoryHolder.value = 0;
+                if (page != null) {
+                    assert page.map == this;
+                    assert page.getKeyCount() > 0;
+                    K key = page.getKey(0);
+                    unsavedMemoryHolder.value += page.getMemory();
+                    while (true) {
+                        if (pos == null) {
+                            if (p.getKeyCount() == 0) {
+                                p = page;
+                            } else {
+                                K[] keys = p.createKeyStorage(1);
+                                keys[0] = key;
+                                Page.PageReference<K,V>[] children = Page.createRefStorage(2);
+                                children[0] = new Page.PageReference<>(p);
+                                children[1] = new Page.PageReference<>(page);
+                                unsavedMemoryHolder.value += p.getMemory();
+                                p = Page.createNode(this, keys, children, p.getTotalCount() + page.getTotalCount(), 0);
+                            }
+                            break;
+                        }
+                        Page<K,V> c = p;
+                        p = pos.page;
+                        index = pos.index;
+                        pos = pos.parent;
+                        p = p.copy();
+                        p.setChild(index, page);
+                        p.insertNode(index, key, c);
+                        keyCount = p.getKeyCount();
+                        int at = keyCount - (p.isLeaf() ? 1 : 2);
+                        if (keyCount <= keysPerPage &&
+                                (p.getMemory() < store.getMaxPageSize() || at <= 0)) {
+                            break;
+                        }
+                        key = p.getKey(at);
+                        page = p.split(at);
+                        unsavedMemoryHolder.value += p.getMemory() + page.getMemory();
+                    }
+                }
+                p = replacePage(pos, p, unsavedMemoryHolder);
+                rootReference = rootReference.updatePageAndLockedStatus(p, preLocked || isPersistent(),
+                        remainingBuffer);
+                if (rootReference != null) {
+                    // should always be the case, except for spurious failure?
+                    locked = preLocked || isPersistent();
+                    if (isPersistent() && tip != null) {
+                        store.registerUnsavedMemory(unsavedMemoryHolder.value + tip.processRemovalInfo(version));
+                    }
+                    assert rootReference.getAppendCounter() <= availabilityThreshold;
+                    break;
+                }
+                rootReference = getRoot();
+            }
+        } finally {
+            if (locked && !preLocked) {
+                rootReference = unlockRoot();
+            }
+        }
+        return rootReference;
+    }
+
+    private static <K,V> Page<K,V> replacePage(CursorPos<K,V> path, Page<K,V> replacement,
+            IntValueHolder unsavedMemoryHolder) {
+        int unsavedMemory = replacement.isSaved() ? 0 : replacement.getMemory();
+        while (path != null) {
+            Page<K,V> parent = path.page;
+            // condition below should always be true, but older versions (up to 1.4.197)
+            // may create single-childed (with no keys) internal nodes, which we skip here
+            if (parent.getKeyCount() > 0) {
+                Page<K,V> child = replacement;
+                replacement = parent.copy();
+                replacement.setChild(path.index, child);
+                unsavedMemory += replacement.getMemory();
+            }
+            path = path.parent;
+        }
+        unsavedMemoryHolder.value += unsavedMemory;
+        return replacement;
+    }
+
+    /**
+     * Appends entry to this map. this method is NOT thread safe and can not be used
+     * neither concurrently, nor in combination with any method that updates this map.
+     * Non-updating method may be used concurrently, but latest appended values
+     * are not guaranteed to be visible.
+     * @param key should be higher in map's order than any existing key
+     * @param value to be appended
+     */
+    public void append(K key, V value) {
+        if (singleWriter) {
+            beforeWrite();
+            RootReference<K,V> rootReference = lockRoot(getRoot(), 1);
+            int appendCounter = rootReference.getAppendCounter();
+            try {
+                if (appendCounter >= keysPerPage) {
+                    rootReference = flushAppendBuffer(rootReference, false);
+                    appendCounter = rootReference.getAppendCounter();
+                    assert appendCounter < keysPerPage;
+                }
+                keysBuffer[appendCounter] = key;
+                valuesBuffer[appendCounter] = value;
+                ++appendCounter;
+            } finally {
+                unlockRoot(appendCounter);
+            }
+        } else {
+            put(key, value);
+        }
+    }
+
+    /**
+     * Removes last entry from this map. this method is NOT thread safe and can not be used
+     * neither concurrently, nor in combination with any method that updates this map.
+     * Non-updating method may be used concurrently, but latest removal may not be visible.
+     */
+    public void trimLast() {
+        if (singleWriter) {
+            RootReference<K,V> rootReference = getRoot();
+            int appendCounter = rootReference.getAppendCounter();
+            boolean useRegularRemove = appendCounter == 0;
+            if (!useRegularRemove) {
+                rootReference = lockRoot(rootReference, 1);
+                try {
+                    appendCounter = rootReference.getAppendCounter();
+                    useRegularRemove = appendCounter == 0;
+                    if (!useRegularRemove) {
+                        --appendCounter;
+                    }
+                } finally {
+                    unlockRoot(appendCounter);
+                }
+            }
+            if (useRegularRemove) {
+                Page<K,V> lastLeaf = rootReference.root.getAppendCursorPos(null).page;
+                assert lastLeaf.isLeaf();
+                assert lastLeaf.getKeyCount() > 0;
+                Object key = lastLeaf.getKey(lastLeaf.getKeyCount() - 1);
+                remove(key);
+            }
+        } else {
+            remove(lastKey());
+        }
     }
 
     @Override
-    public String toString() {
+    public final String toString() {
         return asString(null);
     }
 
@@ -1236,10 +1602,20 @@ public class MVMap<K, V> extends AbstractMap<K, V>
 
         /**
          * Create a new map of the given type.
+         * @param store which will own this map
+         * @param config configuration
          *
          * @return the map
          */
-        M create();
+        M create(MVStore store, Map<String, Object> config);
+
+        DataType<K> getKeyType();
+
+        DataType<V> getValueType();
+
+        void setKeyType(DataType<? super K> dataType);
+
+        void setValueType(DataType<? super V> dataType);
 
     }
 
@@ -1249,16 +1625,38 @@ public class MVMap<K, V> extends AbstractMap<K, V>
      * @param <K> the key type
      * @param <V> the value type
      */
-    public static class Builder<K, V> implements MapBuilder<MVMap<K, V>, K, V> {
+    public abstract static class BasicBuilder<M extends MVMap<K, V>, K, V> implements MapBuilder<M, K, V> {
 
-        protected DataType keyType;
-        protected DataType valueType;
+        private DataType<K> keyType;
+        private DataType<V> valueType;
 
         /**
          * Create a new builder with the default key and value data types.
          */
-        public Builder() {
+        protected BasicBuilder() {
             // ignore
+        }
+
+        @Override
+        public DataType<K> getKeyType() {
+            return keyType;
+        }
+
+        @Override
+        public DataType<V> getValueType() {
+            return valueType;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override
+        public void setKeyType(DataType<? super K> keyType) {
+            this.keyType = (DataType<K>)keyType;
+        }
+
+        @SuppressWarnings("unchecked")
+        @Override
+        public void setValueType(DataType<? super V> valueType) {
+            this.valueType = (DataType<V>)valueType;
         }
 
         /**
@@ -1267,17 +1665,9 @@ public class MVMap<K, V> extends AbstractMap<K, V>
          * @param keyType the key type
          * @return this
          */
-        public Builder<K, V> keyType(DataType keyType) {
-            this.keyType = keyType;
+        public BasicBuilder<M, K, V> keyType(DataType<? super K> keyType) {
+            setKeyType(keyType);
             return this;
-        }
-
-        public DataType getKeyType() {
-            return keyType;
-        }
-
-        public DataType getValueType() {
-            return valueType;
         }
 
         /**
@@ -1286,22 +1676,519 @@ public class MVMap<K, V> extends AbstractMap<K, V>
          * @param valueType the value type
          * @return this
          */
-        public Builder<K, V> valueType(DataType valueType) {
-            this.valueType = valueType;
+        public BasicBuilder<M, K, V> valueType(DataType<? super V> valueType) {
+            setValueType(valueType);
             return this;
         }
 
         @Override
-        public MVMap<K, V> create() {
-            if (keyType == null) {
-                keyType = new ObjectDataType();
+        public M create(MVStore store, Map<String, Object> config) {
+            if (getKeyType() == null) {
+                setKeyType(new ObjectDataType());
             }
-            if (valueType == null) {
-                valueType = new ObjectDataType();
+            if (getValueType() == null) {
+                setValueType(new ObjectDataType());
             }
-            return new MVMap<K, V>(keyType, valueType);
+            DataType<K> keyType = getKeyType();
+            DataType<V> valueType = getValueType();
+            config.put("store", store);
+            config.put("key", keyType);
+            config.put("val", valueType);
+            return create(config);
         }
+
+        /**
+         * Create map from config.
+         * @param config config map
+         * @return new map
+         */
+        protected abstract M create(Map<String, Object> config);
 
     }
 
+    /**
+     * A builder for this class.
+     *
+     * @param <K> the key type
+     * @param <V> the value type
+     */
+    public static class Builder<K, V> extends BasicBuilder<MVMap<K, V>, K, V> {
+        private boolean singleWriter;
+
+        public Builder() {}
+
+        @Override
+        public Builder<K,V> keyType(DataType<? super K> dataType) {
+            setKeyType(dataType);
+            return this;
+        }
+
+        @Override
+        public Builder<K, V> valueType(DataType<? super V> dataType) {
+            setValueType(dataType);
+            return this;
+        }
+
+        /**
+         * Set up this Builder to produce MVMap, which can be used in append mode
+         * by a single thread.
+         * @see MVMap#append(Object, Object)
+         * @return this Builder for chained execution
+         */
+        public Builder<K,V> singleWriter() {
+            singleWriter = true;
+            return this;
+        }
+
+        @Override
+        protected MVMap<K, V> create(Map<String, Object> config) {
+            config.put("singleWriter", singleWriter);
+            Object type = config.get("type");
+            if(type == null || type.equals("rtree")) {
+                return new MVMap<>(config, getKeyType(), getValueType());
+            }
+            throw new IllegalArgumentException("Incompatible map type");
+        }
+    }
+
+    public enum Decision { ABORT, REMOVE, PUT, REPEAT }
+
+    /**
+     * Class DecisionMaker provides callback interface (and should become a such in Java 8)
+     * for MVMap.operate method.
+     * It provides control logic to make a decision about how to proceed with update
+     * at the point in execution when proper place and possible existing value
+     * for insert/update/delete key is found.
+     * Revised value for insert/update is also provided based on original input value
+     * and value currently existing in the map.
+     *
+     * @param <V> value type of the map
+     */
+    public abstract static class DecisionMaker<V>
+    {
+        /**
+         * Decision maker for transaction rollback.
+         */
+        public static final DecisionMaker<Object> DEFAULT = new DecisionMaker<Object>() {
+            @Override
+            public Decision decide(Object existingValue, Object providedValue) {
+                return providedValue == null ? Decision.REMOVE : Decision.PUT;
+            }
+
+            @Override
+            public String toString() {
+                return "default";
+            }
+        };
+
+        /**
+         * Decision maker for put().
+         */
+        public static final DecisionMaker<Object> PUT = new DecisionMaker<Object>() {
+            @Override
+            public Decision decide(Object existingValue, Object providedValue) {
+                return Decision.PUT;
+            }
+
+            @Override
+            public String toString() {
+                return "put";
+            }
+        };
+
+        /**
+         * Decision maker for remove().
+         */
+        public static final DecisionMaker<Object> REMOVE = new DecisionMaker<Object>() {
+            @Override
+            public Decision decide(Object existingValue, Object providedValue) {
+                return Decision.REMOVE;
+            }
+
+            @Override
+            public String toString() {
+                return "remove";
+            }
+        };
+
+        /**
+         * Decision maker for putIfAbsent() key/value.
+         */
+        static final DecisionMaker<Object> IF_ABSENT = new DecisionMaker<Object>() {
+            @Override
+            public Decision decide(Object existingValue, Object providedValue) {
+                return existingValue == null ? Decision.PUT : Decision.ABORT;
+            }
+
+            @Override
+            public String toString() {
+                return "if_absent";
+            }
+        };
+
+        /**
+         * Decision maker for replace().
+         */
+        static final DecisionMaker<Object> IF_PRESENT= new DecisionMaker<Object>() {
+            @Override
+            public Decision decide(Object existingValue, Object providedValue) {
+                return existingValue != null ? Decision.PUT : Decision.ABORT;
+            }
+
+            @Override
+            public String toString() {
+                return "if_present";
+            }
+        };
+
+        /**
+         * Makes a decision about how to proceed with the update.
+         * @param existingValue value currently exists in the map
+         * @param providedValue original input value
+         * @return PUT if a new value need to replace existing one or
+         *             new value to be inserted if there is none
+         *         REMOVE if existing value should be deleted
+         *         ABORT if update operation should be aborted
+         */
+        public abstract Decision decide(V existingValue, V providedValue);
+
+        /**
+         * Provides revised value for insert/update based on original input value
+         * and value currently existing in the map.
+         * This method is only invoked after call to decide(), if it returns PUT.
+         * @param existingValue value currently exists in the map
+         * @param providedValue original input value
+         * @param <T> value type
+         * @return value to be used by insert/update
+         */
+        public <T extends V> T selectValue(T existingValue, T providedValue) {
+            return providedValue;
+        }
+
+        /**
+         * Resets internal state (if any) of a this DecisionMaker to it's initial state.
+         * This method is invoked whenever concurrent update failure is encountered,
+         * so we can re-start update process.
+         */
+        public void reset() {}
+    }
+
+    /**
+     * Add, replace or remove a key-value pair.
+     *
+     * @param key the key (may not be null)
+     * @param value new value, it may be null when removal is intended
+     * @param decisionMaker command object to make choices during transaction.
+     * @return previous value, if mapping for that key existed, or null otherwise
+     */
+    public V operate(K key, V value, DecisionMaker<? super V> decisionMaker) {
+        IntValueHolder unsavedMemoryHolder = new IntValueHolder();
+        int attempt = 0;
+        while(true) {
+            RootReference<K,V> rootReference = flushAndGetRoot();
+            boolean locked = rootReference.isLockedByCurrentThread();
+            if (!locked) {
+                if (attempt++ == 0) {
+                    beforeWrite();
+                } else if (attempt > 3 || rootReference.isLocked()) {
+                    rootReference = lockRoot(rootReference, attempt);
+                    locked = true;
+                }
+            }
+            Page<K,V> rootPage = rootReference.root;
+            long version = rootReference.version;
+            CursorPos<K,V> tip;
+            V result;
+            unsavedMemoryHolder.value = 0;
+            try {
+                CursorPos<K,V> pos = CursorPos.traverseDown(rootPage, key);
+                if(!locked && rootReference != getRoot()) {
+                    continue;
+                }
+                Page<K,V> p = pos.page;
+                int index = pos.index;
+                tip = pos;
+                pos = pos.parent;
+                result = index < 0 ? null : p.getValue(index);
+                Decision decision = decisionMaker.decide(result, value);
+
+                switch (decision) {
+                    case REPEAT:
+                        decisionMaker.reset();
+                        continue;
+                    case ABORT:
+                        if(!locked && rootReference != getRoot()) {
+                            decisionMaker.reset();
+                            continue;
+                        }
+                        return result;
+                    case REMOVE: {
+                        if (index < 0) {
+                            if(!locked && rootReference != getRoot()) {
+                                decisionMaker.reset();
+                                continue;
+                            }
+                            return null;
+                        }
+
+                        if (p.getTotalCount() == 1 && pos != null) {
+                            int keyCount;
+                            do {
+                                p = pos.page;
+                                index = pos.index;
+                                pos = pos.parent;
+                                keyCount = p.getKeyCount();
+                                // condition below should always be false, but older
+                                // versions (up to 1.4.197) may create
+                                // single-childed (with no keys) internal nodes,
+                                // which we skip here
+                            } while (keyCount == 0 && pos != null);
+
+                            if (keyCount <= 1) {
+                                if (keyCount == 1) {
+                                    assert index <= 1;
+                                    p = p.getChildPage(1 - index);
+                                } else {
+                                    // if root happens to be such single-childed
+                                    // (with no keys) internal node, then just
+                                    // replace it with empty leaf
+                                    p = Page.createEmptyLeaf(this);
+                                }
+                                break;
+                            }
+                        }
+                        p = p.copy();
+                        p.remove(index);
+                        break;
+                    }
+                    case PUT: {
+                        value = decisionMaker.selectValue(result, value);
+                        p = p.copy();
+                        if (index < 0) {
+                            p.insertLeaf(-index - 1, key, value);
+                            int keyCount;
+                            while ((keyCount = p.getKeyCount()) > store.getKeysPerPage()
+                                    || p.getMemory() > store.getMaxPageSize()
+                                    && keyCount > (p.isLeaf() ? 1 : 2)) {
+                                long totalCount = p.getTotalCount();
+                                int at = keyCount >> 1;
+                                K k = p.getKey(at);
+                                Page<K,V> split = p.split(at);
+                                unsavedMemoryHolder.value += p.getMemory() + split.getMemory();
+                                if (pos == null) {
+                                    K[] keys = p.createKeyStorage(1);
+                                    keys[0] = k;
+                                    Page.PageReference<K,V>[] children = Page.createRefStorage(2);
+                                    children[0] = new Page.PageReference<>(p);
+                                    children[1] = new Page.PageReference<>(split);
+                                    p = Page.createNode(this, keys, children, totalCount, 0);
+                                    break;
+                                }
+                                Page<K,V> c = p;
+                                p = pos.page;
+                                index = pos.index;
+                                pos = pos.parent;
+                                p = p.copy();
+                                p.setChild(index, split);
+                                p.insertNode(index, k, c);
+                            }
+                        } else {
+                            p.setValue(index, value);
+                        }
+                        break;
+                    }
+                }
+                rootPage = replacePage(pos, p, unsavedMemoryHolder);
+                if (!locked) {
+                    rootReference = rootReference.updateRootPage(rootPage, attempt);
+                    if (rootReference == null) {
+                        decisionMaker.reset();
+                        continue;
+                    }
+                }
+                store.registerUnsavedMemory(unsavedMemoryHolder.value + tip.processRemovalInfo(version));
+                return result;
+            } finally {
+                if(locked) {
+                    unlockRoot(rootPage);
+                }
+            }
+        }
+    }
+
+    private RootReference<K,V> lockRoot(RootReference<K,V> rootReference, int attempt) {
+        while(true) {
+            RootReference<K,V> lockedRootReference = tryLock(rootReference, attempt++);
+            if (lockedRootReference != null) {
+                return lockedRootReference;
+            }
+            rootReference = getRoot();
+        }
+    }
+
+    /**
+     * Try to lock the root.
+     *
+     * @param rootReference the old root reference
+     * @param attempt the number of attempts so far
+     * @return the new root reference
+     */
+    protected RootReference<K,V> tryLock(RootReference<K,V> rootReference, int attempt) {
+        RootReference<K,V> lockedRootReference = rootReference.tryLock(attempt);
+        if (lockedRootReference != null) {
+            return lockedRootReference;
+        }
+
+        RootReference<K,V> oldRootReference = rootReference.previous;
+        int contention = 1;
+        if (oldRootReference != null) {
+            long updateAttemptCounter = rootReference.updateAttemptCounter -
+                                        oldRootReference.updateAttemptCounter;
+            assert updateAttemptCounter >= 0 : updateAttemptCounter;
+            long updateCounter = rootReference.updateCounter - oldRootReference.updateCounter;
+            assert updateCounter >= 0 : updateCounter;
+            assert updateAttemptCounter >= updateCounter : updateAttemptCounter + " >= " + updateCounter;
+            contention += (int)((updateAttemptCounter+1) / (updateCounter+1));
+        }
+
+        if(attempt > 4) {
+            if (attempt <= 12) {
+                Thread.yield();
+            } else if (attempt <= 70 - 2 * contention) {
+                try {
+                    Thread.sleep(contention);
+                } catch (InterruptedException ex) {
+                    throw new RuntimeException(ex);
+                }
+            } else {
+                synchronized (lock) {
+                    notificationRequested = true;
+                    try {
+                        lock.wait(5);
+                    } catch (InterruptedException ignore) {
+                    }
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Unlock the root page, the new root being null.
+     *
+     * @return the new root reference (never null)
+     */
+    private RootReference<K,V> unlockRoot() {
+        return unlockRoot(null, -1);
+    }
+
+    /**
+     * Unlock the root page.
+     *
+     * @param newRootPage the new root
+     * @return the new root reference (never null)
+     */
+    protected RootReference<K,V> unlockRoot(Page<K,V> newRootPage) {
+        return unlockRoot(newRootPage, -1);
+    }
+
+    private void unlockRoot(int appendCounter) {
+        unlockRoot(null, appendCounter);
+    }
+
+    private RootReference<K,V> unlockRoot(Page<K,V> newRootPage, int appendCounter) {
+        RootReference<K,V> updatedRootReference;
+        do {
+            RootReference<K,V> rootReference = getRoot();
+            assert rootReference.isLockedByCurrentThread();
+            updatedRootReference = rootReference.updatePageAndLockedStatus(
+                                        newRootPage == null ? rootReference.root : newRootPage,
+                                        false,
+                                        appendCounter == -1 ? rootReference.getAppendCounter() : appendCounter
+            );
+        } while(updatedRootReference == null);
+
+        notifyWaiters();
+        return updatedRootReference;
+    }
+
+    private void notifyWaiters() {
+        if (notificationRequested) {
+            synchronized (lock) {
+                notificationRequested = false;
+                lock.notify();
+            }
+        }
+    }
+
+    private static final class EqualsDecisionMaker<V> extends DecisionMaker<V> {
+        private final DataType<V> dataType;
+        private final V           expectedValue;
+        private       Decision    decision;
+
+        EqualsDecisionMaker(DataType<V> dataType, V expectedValue) {
+            this.dataType = dataType;
+            this.expectedValue = expectedValue;
+        }
+
+        @Override
+        public Decision decide(V existingValue, V providedValue) {
+            assert decision == null;
+            decision = !areValuesEqual(dataType, expectedValue, existingValue) ? Decision.ABORT :
+                                            providedValue == null ? Decision.REMOVE : Decision.PUT;
+            return decision;
+        }
+
+        @Override
+        public void reset() {
+            decision = null;
+        }
+
+        Decision getDecision() {
+            return decision;
+        }
+
+        @Override
+        public String toString() {
+            return "equals_to "+expectedValue;
+        }
+    }
+
+    private static final class ContainsDecisionMaker<V> extends DecisionMaker<V> {
+        private Decision decision;
+
+        ContainsDecisionMaker() {}
+
+        @Override
+        public Decision decide(V existingValue, V providedValue) {
+            assert decision == null;
+            decision = existingValue == null ? Decision.ABORT : Decision.PUT;
+            return decision;
+        }
+
+        @Override
+        public <T extends V> T selectValue(T existingValue, T providedValue) {
+            return existingValue;
+        }
+
+        @Override
+        public void reset() {
+            decision = null;
+        }
+
+        Decision getDecision() {
+            return decision;
+        }
+
+        @Override
+        public String toString() {
+            return "contains";
+        }
+    }
+
+    private static final class IntValueHolder {
+        int value;
+
+        IntValueHolder() {}
+    }
 }

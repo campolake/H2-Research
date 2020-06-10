@@ -1,24 +1,24 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore.rtree;
 
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+
 import org.h2.mvstore.DataUtils;
 import org.h2.mvstore.WriteBuffer;
-import org.h2.mvstore.type.DataType;
-import org.h2.util.New;
+import org.h2.mvstore.type.BasicDataType;
 
 /**
  * A spatial data type. This class supports up to 31 dimensions. Each dimension
  * can have a minimum and a maximum value of type float. For each dimension, the
  * maximum value is only stored when it is not the same as the minimum.
  */
-public class SpatialDataType implements DataType {
-
+public class SpatialDataType extends BasicDataType<SpatialKey>
+{
     private final int dimensions;
 
     public SpatialDataType(int dimensions) {
@@ -32,7 +32,12 @@ public class SpatialDataType implements DataType {
     }
 
     @Override
-    public int compare(Object a, Object b) {
+    public SpatialKey[] createStorage(int size) {
+        return new SpatialKey[size];
+    }
+
+    @Override
+    public int compare(SpatialKey a, SpatialKey b) {
         if (a == b) {
             return 0;
         } else if (a == null) {
@@ -40,9 +45,9 @@ public class SpatialDataType implements DataType {
         } else if (b == null) {
             return 1;
         }
-        long la = ((SpatialKey) a).getId();
-        long lb = ((SpatialKey) b).getId();
-        return la < lb ? -1 : la > lb ? 1 : 0;
+        long la = a.getId();
+        long lb = b.getId();
+        return Long.compare(la, lb);
     }
 
     /**
@@ -64,27 +69,12 @@ public class SpatialDataType implements DataType {
     }
 
     @Override
-    public int getMemory(Object obj) {
+    public int getMemory(SpatialKey obj) {
         return 40 + dimensions * 4;
     }
 
     @Override
-    public void read(ByteBuffer buff, Object[] obj, int len, boolean key) {
-        for (int i = 0; i < len; i++) {
-            obj[i] = read(buff);
-        }
-    }
-
-    @Override
-    public void write(WriteBuffer buff, Object[] obj, int len, boolean key) {
-        for (int i = 0; i < len; i++) {
-            write(buff, obj[i]);
-        }
-    }
-
-    @Override
-    public void write(WriteBuffer buff, Object obj) {
-        SpatialKey k = (SpatialKey) obj;
+    public void write(WriteBuffer buff, SpatialKey k) {
         if (k.isNull()) {
             buff.putVarInt(-1);
             buff.putVarLong(k.getId());
@@ -107,7 +97,7 @@ public class SpatialDataType implements DataType {
     }
 
     @Override
-    public Object read(ByteBuffer buff) {
+    public SpatialKey read(ByteBuffer buff) {
         int flags = DataUtils.readVarInt(buff);
         if (flags == -1) {
             long id = DataUtils.readVarLong(buff);
@@ -132,13 +122,11 @@ public class SpatialDataType implements DataType {
     /**
      * Check whether the two objects overlap.
      *
-     * @param objA the first object
-     * @param objB the second object
+     * @param a the first object
+     * @param b the second object
      * @return true if they overlap
      */
-    public boolean isOverlap(Object objA, Object objB) {
-        SpatialKey a = (SpatialKey) objA;
-        SpatialKey b = (SpatialKey) objB;
+    public boolean isOverlap(SpatialKey a, SpatialKey b) {
         if (a.isNull() || b.isNull()) {
             return false;
         }
@@ -163,8 +151,14 @@ public class SpatialDataType implements DataType {
             return;
         }
         for (int i = 0; i < dimensions; i++) {
-            b.setMin(i, Math.min(b.min(i), a.min(i)));
-            b.setMax(i, Math.max(b.max(i), a.max(i)));
+            float v = a.min(i);
+            if (v < b.min(i)) {
+                b.setMin(i, v);
+            }
+            v = a.max(i);
+            if (v > b.max(i)) {
+                b.setMax(i, v);
+            }
         }
     }
 
@@ -282,17 +276,12 @@ public class SpatialDataType implements DataType {
      * @param objA the object
      * @return the bounding box
      */
-    Object createBoundingBox(Object objA) {
+    SpatialKey createBoundingBox(Object objA) {
         SpatialKey a = (SpatialKey) objA;
         if (a.isNull()) {
             return a;
         }
-        float[] minMax = new float[dimensions * 2];
-        for (int i = 0; i < dimensions; i++) {
-            minMax[i + i] = a.min(i);
-            minMax[i + i + 1] = a.max(i);
-        }
-        return new SpatialKey(0, minMax);
+        return new SpatialKey(0, a);
     }
 
     /**
@@ -305,18 +294,17 @@ public class SpatialDataType implements DataType {
      */
     public int[] getExtremes(ArrayList<Object> list) {
         list = getNotNull(list);
-        if (list.size() == 0) {
+        if (list.isEmpty()) {
             return null;
         }
-        SpatialKey bounds = (SpatialKey) createBoundingBox(list.get(0));
-        SpatialKey boundsInner = (SpatialKey) createBoundingBox(bounds);
+        SpatialKey bounds = createBoundingBox(list.get(0));
+        SpatialKey boundsInner = createBoundingBox(bounds);
         for (int i = 0; i < dimensions; i++) {
             float t = boundsInner.min(i);
             boundsInner.setMin(i, boundsInner.max(i));
             boundsInner.setMax(i, t);
         }
-        for (int i = 0; i < list.size(); i++) {
-            Object o = list.get(i);
+        for (Object o : list) {
             increaseBounds(bounds, o);
             increaseMaxInnerBounds(boundsInner, o);
         }
@@ -353,17 +341,18 @@ public class SpatialDataType implements DataType {
     }
 
     private static ArrayList<Object> getNotNull(ArrayList<Object> list) {
-        ArrayList<Object> result = null;
+        boolean foundNull = false;
         for (Object o : list) {
             SpatialKey a = (SpatialKey) o;
             if (a.isNull()) {
-                result = New.arrayList();
+                foundNull = true;
                 break;
             }
         }
-        if (result == null) {
+        if (!foundNull) {
             return list;
         }
+        ArrayList<Object> result = new ArrayList<>();
         for (Object o : list) {
             SpatialKey a = (SpatialKey) o;
             if (!a.isNull()) {

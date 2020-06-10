@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.jdbc;
@@ -14,11 +14,12 @@ import java.sql.Statement;
 
 import org.h2.api.ErrorCode;
 import org.h2.test.TestBase;
+import org.h2.test.TestDb;
 
 /**
  * Tests Statement.cancel
  */
-public class TestCancel extends TestBase {
+public class TestCancel extends TestDb {
 
     private static int lastVisited;
 
@@ -116,7 +117,7 @@ public class TestCancel extends TestBase {
         assertEquals(1, stat.getQueryTimeout());
         Statement s2 = conn.createStatement();
         assertEquals(1, s2.getQueryTimeout());
-        ResultSet rs = s2.executeQuery("SELECT VALUE " +
+        ResultSet rs = s2.executeQuery("SELECT `VALUE` " +
                 "FROM INFORMATION_SCHEMA.SETTINGS WHERE NAME = 'QUERY_TIMEOUT'");
         rs.next();
         assertEquals(1000, rs.getInt(1));

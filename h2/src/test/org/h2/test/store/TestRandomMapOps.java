@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.store;
@@ -51,9 +51,7 @@ public class TestRandomMapOps extends TestBase {
             try {
                 testOps(fileName, size, seed);
                 continue;
-            } catch (Exception e) {
-                ex = e;
-            } catch (AssertionError e) {
+            } catch (Exception | AssertionError e) {
                 ex = e;
             }
             if (op < best) {
@@ -77,7 +75,7 @@ public class TestRandomMapOps extends TestBase {
         MVMap<Integer, byte[]> m = s.openMap("data");
         Random r = new Random(seed);
         op = 0;
-        TreeMap<Integer, byte[]> map = new TreeMap<Integer, byte[]>();
+        TreeMap<Integer, byte[]> map = new TreeMap<>();
         for (; op < size; op++) {
             int k = r.nextInt(100);
             byte[] v = new byte[r.nextInt(10) * 10];
@@ -128,7 +126,7 @@ public class TestRandomMapOps extends TestBase {
                 break;
             case 11:
                 log(op, k, v, "m.getKeyIndex({0})");
-                ArrayList<Integer> keyList = new ArrayList<Integer>(map.keySet());
+                ArrayList<Integer> keyList = new ArrayList<>(map.keySet());
                 int index = Collections.binarySearch(keyList, k, null);
                 int index2 = (int) m.getKeyIndex(k);
                 assertEquals(index, index2);

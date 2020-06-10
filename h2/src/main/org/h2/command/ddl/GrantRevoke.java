@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.ddl;
@@ -18,7 +18,7 @@ import org.h2.engine.Session;
 import org.h2.message.DbException;
 import org.h2.schema.Schema;
 import org.h2.table.Table;
-import org.h2.util.New;
+import org.h2.util.Utils;
 
 /**
  * This class represents the statements
@@ -32,7 +32,7 @@ public class GrantRevoke extends DefineCommand {
     private ArrayList<String> roleNames;
     private int operationType;
     private int rightMask;
-    private final ArrayList<Table> tables = New.arrayList();
+    private final ArrayList<Table> tables = Utils.newSmallArrayList();
     private Schema schema;
     private RightOwner grantee;
 
@@ -60,7 +60,7 @@ public class GrantRevoke extends DefineCommand {
      */
     public void addRoleName(String roleName) {
         if (roleNames == null) {
-            roleNames = New.arrayList();
+            roleNames = Utils.newSmallArrayList();
         }
         roleNames.add(roleName);
     }
@@ -120,7 +120,10 @@ public class GrantRevoke extends DefineCommand {
         Database db = session.getDatabase();
         Right right = grantee.getRightForObject(object);
         if (right == null) {
-            int id = getObjectId();
+            int id = getPersistedObjectId();
+            if (id == 0) {
+                id = session.getDatabase().allocateObjectId();
+            }
             right = new Right(db, id, grantee, rightMask, object);
             grantee.grantRight(object, right);
             db.addDatabaseObject(session, right);
@@ -146,7 +149,7 @@ public class GrantRevoke extends DefineCommand {
             //当自己授予自己时，grantedRole.isRoleGranted也会返回true
             if (grantedRole.isRoleGranted(granteeRole)) {
                 // cyclic role grants are not allowed
-                throw DbException.get(ErrorCode.ROLE_ALREADY_GRANTED_1, grantedRole.getSQL());
+                throw DbException.get(ErrorCode.ROLE_ALREADY_GRANTED_1, grantedRole.getSQL(false));
             }
         }
         Database db = session.getDatabase();
@@ -219,17 +222,4 @@ public class GrantRevoke extends DefineCommand {
         return operationType;
     }
 
-    /**
-     * @return true if this command is using Roles
-     */
-    public boolean isRoleMode() {
-        return roleNames != null;
-    }
-
-    /**
-     * @return true if this command is using Rights
-     */
-    public boolean isRightMode() {
-        return rightMask != 0;
-    }
 }

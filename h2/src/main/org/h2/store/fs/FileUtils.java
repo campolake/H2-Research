@@ -1,24 +1,62 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.store.fs;
 
 import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
+import java.nio.file.OpenOption;
+import java.nio.file.StandardOpenOption;
+import java.nio.file.attribute.FileAttribute;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.EnumSet;
 import java.util.List;
-import org.h2.util.New;
+import java.util.Set;
 
 /**
  * This utility class contains utility functions that use the file system
  * abstraction.
  */
 public class FileUtils {
+
+    /**
+     * {@link StandardOpenOption#READ}.
+     */
+    public static final Set<? extends OpenOption> R = Collections.singleton(StandardOpenOption.READ);
+
+    /**
+     * {@link StandardOpenOption#READ}, {@link StandardOpenOption#WRITE}, and
+     * {@link StandardOpenOption#CREATE}.
+     */
+    public static final Set<? extends OpenOption> RW = Collections
+            .unmodifiableSet(EnumSet.of(StandardOpenOption.READ, StandardOpenOption.WRITE, StandardOpenOption.CREATE));
+
+    /**
+     * {@link StandardOpenOption#READ}, {@link StandardOpenOption#WRITE},
+     * {@link StandardOpenOption#CREATE}, and {@link StandardOpenOption#SYNC}.
+     */
+    public static final Set<? extends OpenOption> RWS = Collections.unmodifiableSet(EnumSet.of(StandardOpenOption.READ,
+            StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.SYNC));
+
+    /**
+     * {@link StandardOpenOption#READ}, {@link StandardOpenOption#WRITE},
+     * {@link StandardOpenOption#CREATE}, and {@link StandardOpenOption#DSYNC}.
+     */
+    public static final Set<? extends OpenOption> RWD = Collections.unmodifiableSet(EnumSet.of(StandardOpenOption.READ,
+            StandardOpenOption.WRITE, StandardOpenOption.CREATE, StandardOpenOption.DSYNC));
+
+    /**
+     * No file attributes.
+     */
+    public static final FileAttribute<?>[] NO_ATTRIBUTES = new FileAttribute[0];
 
     /**
      * Checks if a file exists.
@@ -101,6 +139,8 @@ public class FileUtils {
         return FilePath.get(fileName).isAbsolute()
                 // Allows Windows to recognize "/path" as absolute.
                 // Makes the same configuration work on all platforms.
+                || fileName.startsWith(File.pathSeparator)
+                // Just in case of non-normalized path on Windows
                 || fileName.startsWith("/");
     }
 
@@ -149,9 +189,9 @@ public class FileUtils {
     public static List<String> newDirectoryStream(String path) { //文件和目录名都会列出来
         List<FilePath> list = FilePath.get(path).newDirectoryStream();
         int len = list.size();
-        List<String> result = New.arrayList(len);
-        for (int i = 0; i < len; i++) {
-            result.add(list.get(i).toString());
+        List<String> result = new ArrayList<>(len);
+        for (FilePath filePath : list) {
+            result.add(filePath.toString());
         }
         return result;
     }
@@ -335,15 +375,12 @@ public class FileUtils {
      * @param prefix the prefix of the file name (including directory name if
      *            required)
      * @param suffix the suffix
-     * @param deleteOnExit if the file should be deleted when the virtual
-     *            machine exists
      * @param inTempDir if the file should be stored in the temporary directory
      * @return the name of the created file
      */
     public static String createTempFile(String prefix, String suffix,
-            boolean deleteOnExit, boolean inTempDir) throws IOException {
-        return FilePath.get(prefix).createTempFile(
-                suffix, deleteOnExit, inTempDir).toString();
+            boolean inTempDir) throws IOException {
+        return FilePath.get(prefix).createTempFile(suffix, inTempDir).toString();
     }
 
     /**
@@ -374,6 +411,27 @@ public class FileUtils {
         do {
             channel.write(src);
         } while (src.remaining() > 0);
+    }
+
+    public static Set<? extends OpenOption> modeToOptions(String mode) {
+        Set<? extends OpenOption> options;
+        switch (mode) {
+        case "r":
+            options = R;
+            break;
+        case "rw":
+            options = RW;
+            break;
+        case "rws":
+            options = RWS;
+            break;
+        case "rwd":
+            options = RWD;
+            break;
+        default:
+            throw new IllegalArgumentException(mode);
+        }
+        return options;
     }
 
 }

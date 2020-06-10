@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.table;
@@ -11,19 +11,24 @@ import java.io.InputStreamReader;
 import java.io.Reader;
 import java.sql.DatabaseMetaData;
 import java.sql.ResultSet;
-import java.sql.Timestamp;
+import java.sql.Types;
 import java.text.Collator;
 import java.util.ArrayList;
-import java.util.Collections;
-import java.util.HashMap;
+import java.util.BitSet;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Map;
+
 import org.h2.command.Command;
+import org.h2.command.Parser;
 import org.h2.constraint.Constraint;
+import org.h2.constraint.Constraint.Type;
+import org.h2.constraint.ConstraintActionType;
 import org.h2.constraint.ConstraintCheck;
+import org.h2.constraint.ConstraintDomain;
 import org.h2.constraint.ConstraintReferential;
 import org.h2.constraint.ConstraintUnique;
 import org.h2.engine.Constants;
-import org.h2.engine.Database;
 import org.h2.engine.DbObject;
 import org.h2.engine.FunctionAlias;
 import org.h2.engine.FunctionAlias.JavaMethod;
@@ -34,36 +39,42 @@ import org.h2.engine.Session;
 import org.h2.engine.Setting;
 import org.h2.engine.User;
 import org.h2.engine.UserAggregate;
-import org.h2.engine.UserDataType;
+import org.h2.expression.ExpressionVisitor;
 import org.h2.expression.ValueExpression;
 import org.h2.index.Index;
 import org.h2.index.IndexType;
 import org.h2.index.MetaIndex;
-import org.h2.index.MultiVersionIndex;
-import org.h2.jdbc.JdbcSQLException;
 import org.h2.message.DbException;
 import org.h2.mvstore.FileStore;
+import org.h2.mvstore.MVStore;
 import org.h2.mvstore.db.MVTableEngine.Store;
+import org.h2.pagestore.PageStore;
 import org.h2.result.Row;
 import org.h2.result.SearchRow;
 import org.h2.result.SortOrder;
 import org.h2.schema.Constant;
+import org.h2.schema.Domain;
 import org.h2.schema.Schema;
 import org.h2.schema.SchemaObject;
 import org.h2.schema.Sequence;
 import org.h2.schema.TriggerObject;
 import org.h2.store.InDoubtTransaction;
-import org.h2.store.PageStore;
 import org.h2.tools.Csv;
+import org.h2.util.DateTimeUtils;
 import org.h2.util.MathUtils;
-import org.h2.util.New;
-import org.h2.util.StatementBuilder;
+import org.h2.util.NetworkConnectionInfo;
 import org.h2.util.StringUtils;
+import org.h2.util.TimeZoneProvider;
 import org.h2.util.Utils;
 import org.h2.value.CompareMode;
 import org.h2.value.DataType;
 import org.h2.value.Value;
+import org.h2.value.ValueBoolean;
+import org.h2.value.ValueDouble;
+import org.h2.value.ValueInt;
+import org.h2.value.ValueLong;
 import org.h2.value.ValueNull;
+import org.h2.value.ValueShort;
 import org.h2.value.ValueString;
 import org.h2.value.ValueStringIgnoreCase;
 
@@ -99,17 +110,22 @@ public class MetaTable extends Table {
     private static final int VIEWS = 17;
     private static final int IN_DOUBT = 18;
     private static final int CROSS_REFERENCES = 19;
-    private static final int CONSTRAINTS = 20;
-    private static final int FUNCTION_COLUMNS = 21;
-    private static final int CONSTANTS = 22;
-    private static final int DOMAINS = 23;
-    private static final int TRIGGERS = 24;
-    private static final int SESSIONS = 25;
-    private static final int LOCKS = 26;
-    private static final int SESSION_STATE = 27;
-    private static final int QUERY_STATISTICS = 28;
-    private static final int SYNONYMS = 29;
-    private static final int META_TABLE_TYPE_COUNT = SYNONYMS + 1;
+    private static final int FUNCTION_COLUMNS = 20;
+    private static final int CONSTANTS = 21;
+    private static final int DOMAINS = 22;
+    private static final int TRIGGERS = 23;
+    private static final int SESSIONS = 24;
+    private static final int LOCKS = 25;
+    private static final int SESSION_STATE = 26;
+    private static final int QUERY_STATISTICS = 27;
+    private static final int SYNONYMS = 28;
+    private static final int TABLE_CONSTRAINTS = 29;
+    private static final int DOMAIN_CONSTRAINTS = 30;
+    private static final int KEY_COLUMN_USAGE = 31;
+    private static final int REFERENTIAL_CONSTRAINTS = 32;
+    private static final int CHECK_CONSTRAINTS = 33;
+    private static final int CONSTRAINT_COLUMN_USAGE = 34;
+    private static final int META_TABLE_TYPE_COUNT = CONSTRAINT_COLUMN_USAGE + 1;
 
     private final int type;
     private final int indexColumn;
@@ -130,7 +146,7 @@ public class MetaTable extends Table {
         String indexColumnName = null;
         switch (type) {
         case TABLES:
-            setObjectName("TABLES");
+            setMetaTableName("TABLES");
             cols = createColumns(
                     "TABLE_CATALOG",
                     "TABLE_SCHEMA",
@@ -149,7 +165,7 @@ public class MetaTable extends Table {
             indexColumnName = "TABLE_NAME";
             break;
         case COLUMNS:
-            setObjectName("COLUMNS");
+            setMetaTableName("COLUMNS");
             cols = createColumns(
                     "TABLE_CATALOG",
                     "TABLE_SCHEMA",
@@ -164,22 +180,32 @@ public class MetaTable extends Table {
                     "NUMERIC_PRECISION INT",
                     "NUMERIC_PRECISION_RADIX INT",
                     "NUMERIC_SCALE INT",
+                    "DATETIME_PRECISION INT",
+                    "INTERVAL_TYPE",
+                    "INTERVAL_PRECISION INT",
                     "CHARACTER_SET_NAME",
                     "COLLATION_NAME",
+                    "DOMAIN_CATALOG",
+                    "DOMAIN_SCHEMA",
+                    "DOMAIN_NAME",
+                    "IS_GENERATED",
+                    "GENERATION_EXPRESSION",
                     // extensions
                     "TYPE_NAME",
                     "NULLABLE INT",
                     "IS_COMPUTED BIT",
                     "SELECTIVITY INT",
-                    "CHECK_CONSTRAINT",
                     "SEQUENCE_NAME",
                     "REMARKS",
-                    "SOURCE_DATA_TYPE SMALLINT"
+                    "SOURCE_DATA_TYPE SMALLINT",
+                    "COLUMN_TYPE",
+                    "COLUMN_ON_UPDATE",
+                    "IS_VISIBLE"
             );
             indexColumnName = "TABLE_NAME";
             break;
         case INDEXES:
-            setObjectName("INDEXES");
+            setMetaTableName("INDEXES");
             cols = createColumns(
                     "TABLE_CATALOG",
                     "TABLE_SCHEMA",
@@ -201,17 +227,16 @@ public class MetaTable extends Table {
                     "ID INT",
                     "SORT_TYPE INT",
                     "CONSTRAINT_NAME",
-                    "INDEX_CLASS",
-                    "AFFINITY BIT"
+                    "INDEX_CLASS"
             );
             indexColumnName = "TABLE_NAME";
             break;
         case TABLE_TYPES:
-            setObjectName("TABLE_TYPES");
+            setMetaTableName("TABLE_TYPES");
             cols = createColumns("TYPE");
             break;
         case TYPE_INFO:
-            setObjectName("TYPE_INFO");
+            setMetaTableName("TYPE_INFO");
             cols = createColumns(
                 "TYPE_NAME",
                 "DATA_TYPE INT",
@@ -230,15 +255,15 @@ public class MetaTable extends Table {
             );
             break;
         case CATALOGS:
-            setObjectName("CATALOGS");
+            setMetaTableName("CATALOGS");
             cols = createColumns("CATALOG_NAME");
             break;
         case SETTINGS:
-            setObjectName("SETTINGS");
+            setMetaTableName("SETTINGS");
             cols = createColumns("NAME", "VALUE");
             break;
         case HELP:
-            setObjectName("HELP");
+            setMetaTableName("HELP");
             cols = createColumns(
                     "ID INT",
                     "SECTION",
@@ -248,24 +273,29 @@ public class MetaTable extends Table {
             );
             break;
         case SEQUENCES:
-            setObjectName("SEQUENCES");
+            setMetaTableName("SEQUENCES");
             cols = createColumns(
                     "SEQUENCE_CATALOG",
                     "SEQUENCE_SCHEMA",
                     "SEQUENCE_NAME",
-                    "CURRENT_VALUE BIGINT",
+                    "DATA_TYPE",
+                    "NUMERIC_PRECISION INT",
+                    "NUMERIC_PRECISION_RADIX INT",
+                    "NUMERIC_SCALE INT",
+                    "START_VALUE BIGINT",
+                    "MINIMUM_VALUE BIGINT",
+                    "MAXIMUM_VALUE BIGINT",
                     "INCREMENT BIGINT",
+                    "CYCLE_OPTION",
+                    "CURRENT_VALUE BIGINT",
                     "IS_GENERATED BIT",
                     "REMARKS",
                     "CACHE BIGINT",
-                    "MIN_VALUE BIGINT",
-                    "MAX_VALUE BIGINT",
-                    "IS_CYCLE BIT",
                     "ID INT"
             );
             break;
         case USERS:
-            setObjectName("USERS");
+            setMetaTableName("USERS");
             cols = createColumns(
                     "NAME",
                     "ADMIN",
@@ -274,7 +304,7 @@ public class MetaTable extends Table {
             );
             break;
         case ROLES:
-            setObjectName("ROLES");
+            setMetaTableName("ROLES");
             cols = createColumns(
                     "NAME",
                     "REMARKS",
@@ -282,7 +312,7 @@ public class MetaTable extends Table {
             );
             break;
         case RIGHTS:
-            setObjectName("RIGHTS");
+            setMetaTableName("RIGHTS");
             cols = createColumns(
                     "GRANTEE",
                     "GRANTEETYPE",
@@ -295,7 +325,7 @@ public class MetaTable extends Table {
             indexColumnName = "TABLE_NAME";
             break;
         case FUNCTION_ALIASES:
-            setObjectName("FUNCTION_ALIASES");
+            setMetaTableName("FUNCTION_ALIASES");
             cols = createColumns(
                     "ALIAS_CATALOG",
                     "ALIAS_SCHEMA",
@@ -312,7 +342,7 @@ public class MetaTable extends Table {
             );
             break;
         case FUNCTION_COLUMNS:
-            setObjectName("FUNCTION_COLUMNS");
+            setMetaTableName("FUNCTION_COLUMNS");
             cols = createColumns(
                     "ALIAS_CATALOG",
                     "ALIAS_SCHEMA",
@@ -334,7 +364,7 @@ public class MetaTable extends Table {
             );
             break;
         case SCHEMATA:
-            setObjectName("SCHEMATA");
+            setMetaTableName("SCHEMATA");
             cols = createColumns(
                     "CATALOG_NAME",
                     "SCHEMA_NAME",
@@ -347,7 +377,7 @@ public class MetaTable extends Table {
             );
             break;
         case TABLE_PRIVILEGES:
-            setObjectName("TABLE_PRIVILEGES");
+            setMetaTableName("TABLE_PRIVILEGES");
             cols = createColumns(
                     "GRANTOR",
                     "GRANTEE",
@@ -360,7 +390,7 @@ public class MetaTable extends Table {
             indexColumnName = "TABLE_NAME";
             break;
         case COLUMN_PRIVILEGES:
-            setObjectName("COLUMN_PRIVILEGES");
+            setMetaTableName("COLUMN_PRIVILEGES");
             cols = createColumns(
                     "GRANTOR",
                     "GRANTEE",
@@ -374,14 +404,14 @@ public class MetaTable extends Table {
             indexColumnName = "TABLE_NAME";
             break;
         case COLLATIONS:
-            setObjectName("COLLATIONS");
+            setMetaTableName("COLLATIONS");
             cols = createColumns(
                     "NAME",
                     "KEY"
             );
             break;
         case VIEWS:
-            setObjectName("VIEWS");
+            setMetaTableName("VIEWS");
             cols = createColumns(
                     "TABLE_CATALOG",
                     "TABLE_SCHEMA",
@@ -396,14 +426,14 @@ public class MetaTable extends Table {
             indexColumnName = "TABLE_NAME";
             break;
         case IN_DOUBT:
-            setObjectName("IN_DOUBT");
+            setMetaTableName("IN_DOUBT");
             cols = createColumns(
                     "TRANSACTION",
                     "STATE"
             );
             break;
         case CROSS_REFERENCES:
-            setObjectName("CROSS_REFERENCES");
+            setMetaTableName("CROSS_REFERENCES");
             cols = createColumns(
                     "PKTABLE_CATALOG",
                     "PKTABLE_SCHEMA",
@@ -422,27 +452,8 @@ public class MetaTable extends Table {
             );
             indexColumnName = "PKTABLE_NAME";
             break;
-        case CONSTRAINTS:
-            setObjectName("CONSTRAINTS");
-            cols = createColumns(
-                    "CONSTRAINT_CATALOG",
-                    "CONSTRAINT_SCHEMA",
-                    "CONSTRAINT_NAME",
-                    "CONSTRAINT_TYPE",
-                    "TABLE_CATALOG",
-                    "TABLE_SCHEMA",
-                    "TABLE_NAME",
-                    "UNIQUE_INDEX_NAME",
-                    "CHECK_EXPRESSION",
-                    "COLUMN_LIST",
-                    "REMARKS",
-                    "SQL",
-                    "ID INT"
-            );
-            indexColumnName = "TABLE_NAME";
-            break;
         case CONSTANTS:
-            setObjectName("CONSTANTS");
+            setMetaTableName("CONSTANTS");
             cols = createColumns(
                     "CONSTANT_CATALOG",
                     "CONSTANT_SCHEMA",
@@ -454,26 +465,28 @@ public class MetaTable extends Table {
             );
             break;
         case DOMAINS:
-            setObjectName("DOMAINS");
+            setMetaTableName("DOMAINS");
             cols = createColumns(
                     "DOMAIN_CATALOG",
                     "DOMAIN_SCHEMA",
                     "DOMAIN_NAME",
-                    "COLUMN_DEFAULT",
-                    "IS_NULLABLE",
+                    "DOMAIN_DEFAULT",
+                    "DOMAIN_ON_UPDATE",
                     "DATA_TYPE INT",
                     "PRECISION INT",
                     "SCALE INT",
                     "TYPE_NAME",
+                    "PARENT_DOMAIN_CATALOG",
+                    "PARENT_DOMAIN_SCHEMA",
+                    "PARENT_DOMAIN_NAME",
                     "SELECTIVITY INT",
-                    "CHECK_CONSTRAINT",
                     "REMARKS",
                     "SQL",
                     "ID INT"
             );
             break;
         case TRIGGERS:
-            setObjectName("TRIGGERS");
+            setMetaTableName("TRIGGERS");
             cols = createColumns(
                     "TRIGGER_CATALOG",
                     "TRIGGER_SCHEMA",
@@ -492,19 +505,25 @@ public class MetaTable extends Table {
             );
             break;
         case SESSIONS: {
-            setObjectName("SESSIONS");
+            setMetaTableName("SESSIONS");
             cols = createColumns(
                     "ID INT",
                     "USER_NAME",
-                    "SESSION_START",
+                    "SERVER",
+                    "CLIENT_ADDR",
+                    "CLIENT_INFO",
+                    "SESSION_START TIMESTAMP WITH TIME ZONE",
+                    "ISOLATION_LEVEL",
                     "STATEMENT",
-                    "STATEMENT_START",
-                    "CONTAINS_UNCOMMITTED"
+                    "STATEMENT_START TIMESTAMP WITH TIME ZONE",
+                    "CONTAINS_UNCOMMITTED BIT",
+                    "STATE",
+                    "BLOCKER_ID INT"
             );
             break;
         }
         case LOCKS: {
-            setObjectName("LOCKS");
+            setMetaTableName("LOCKS");
             cols = createColumns(
                     "TABLE_SCHEMA",
                     "TABLE_NAME",
@@ -514,7 +533,7 @@ public class MetaTable extends Table {
             break;
         }
         case SESSION_STATE: {
-            setObjectName("SESSION_STATE");
+            setMetaTableName("SESSION_STATE");
             cols = createColumns(
                     "KEY",
                     "SQL"
@@ -522,7 +541,7 @@ public class MetaTable extends Table {
             break;
         }
         case QUERY_STATISTICS: {
-            setObjectName("QUERY_STATISTICS");
+            setMetaTableName("QUERY_STATISTICS");
             cols = createColumns(
                     "SQL_STATEMENT",
                     "EXECUTION_COUNT INT",
@@ -540,19 +559,114 @@ public class MetaTable extends Table {
             break;
         }
         case SYNONYMS: {
-                setObjectName("SYNONYMS");
-                cols = createColumns(
-                        "SYNONYM_CATALOG",
-                        "SYNONYM_SCHEMA",
-                        "SYNONYM_NAME",
-                        "SYNONYM_FOR",
-                        "TYPE_NAME",
-                        "STATUS",
-                        "REMARKS",
-                        "ID INT"
-                );
-                indexColumnName = "SYNONYM_NAME";
-                break;
+            setMetaTableName("SYNONYMS");
+            cols = createColumns(
+                    "SYNONYM_CATALOG",
+                    "SYNONYM_SCHEMA",
+                    "SYNONYM_NAME",
+                    "SYNONYM_FOR",
+                    "SYNONYM_FOR_SCHEMA",
+                    "TYPE_NAME",
+                    "STATUS",
+                    "REMARKS",
+                    "ID INT"
+            );
+            indexColumnName = "SYNONYM_NAME";
+            break;
+        }
+        case TABLE_CONSTRAINTS: {
+            setMetaTableName("TABLE_CONSTRAINTS");
+            cols = createColumns(
+                    "CONSTRAINT_CATALOG",
+                    "CONSTRAINT_SCHEMA",
+                    "CONSTRAINT_NAME",
+                    "CONSTRAINT_TYPE",
+                    "TABLE_CATALOG",
+                    "TABLE_SCHEMA",
+                    "TABLE_NAME",
+                    "IS_DEFERRABLE",
+                    "INITIALLY_DEFERRED",
+                    "REMARKS",
+                    "SQL",
+                    "ID INT"
+            );
+            indexColumnName = "TABLE_NAME";
+            break;
+        }
+        case DOMAIN_CONSTRAINTS: {
+            setMetaTableName("DOMAIN_CONSTRAINTS");
+            cols = createColumns(
+                    "CONSTRAINT_CATALOG",
+                    "CONSTRAINT_SCHEMA",
+                    "CONSTRAINT_NAME",
+                    "DOMAIN_CATALOG",
+                    "DOMAIN_SCHEMA",
+                    "DOMAIN_NAME",
+                    "IS_DEFERRABLE",
+                    "INITIALLY_DEFERRED",
+                    "REMARKS",
+                    "SQL",
+                    "ID INT"
+            );
+            break;
+        }
+        case KEY_COLUMN_USAGE: {
+            setMetaTableName("KEY_COLUMN_USAGE");
+            cols = createColumns(
+                    "CONSTRAINT_CATALOG",
+                    "CONSTRAINT_SCHEMA",
+                    "CONSTRAINT_NAME",
+                    "TABLE_CATALOG",
+                    "TABLE_SCHEMA",
+                    "TABLE_NAME",
+                    "COLUMN_NAME",
+                    "ORDINAL_POSITION INT",
+                    "POSITION_IN_UNIQUE_CONSTRAINT INT",
+                    "INDEX_CATALOG",
+                    "INDEX_SCHEMA",
+                    "INDEX_NAME"
+            );
+            indexColumnName = "TABLE_NAME";
+            break;
+        }
+        case REFERENTIAL_CONSTRAINTS: {
+            setMetaTableName("REFERENTIAL_CONSTRAINTS");
+            cols = createColumns(
+                    "CONSTRAINT_CATALOG",
+                    "CONSTRAINT_SCHEMA",
+                    "CONSTRAINT_NAME",
+                    "UNIQUE_CONSTRAINT_CATALOG",
+                    "UNIQUE_CONSTRAINT_SCHEMA",
+                    "UNIQUE_CONSTRAINT_NAME",
+                    "MATCH_OPTION",
+                    "UPDATE_RULE",
+                    "DELETE_RULE"
+            );
+            break;
+        }
+        case CHECK_CONSTRAINTS: {
+            setMetaTableName("CHECK_CONSTRAINTS");
+            cols = createColumns(
+                    "CONSTRAINT_CATALOG",
+                    "CONSTRAINT_SCHEMA",
+                    "CONSTRAINT_NAME",
+                    "CHECK_CLAUSE"
+            );
+            break;
+        }
+        case CONSTRAINT_COLUMN_USAGE: {
+            setMetaTableName("CONSTRAINT_COLUMN_USAGE");
+            cols = createColumns(
+                    "TABLE_CATALOG",
+                    "TABLE_SCHEMA",
+                    "TABLE_NAME",
+                    "COLUMN_NAME",
+                    "CONSTRAINT_CATALOG",
+                    "CONSTRAINT_SCHEMA",
+                    "CONSTRAINT_NAME"
+            );
+            indexColumnName = "TABLE_NAME";
+            break;
         }
         default:
             throw DbException.throwInternalError("type="+type);
@@ -563,36 +677,35 @@ public class MetaTable extends Table {
             indexColumn = -1;
             metaIndex = null;
         } else {
-            indexColumn = getColumn(indexColumnName).getColumnId();
+            indexColumn = getColumn(database.sysIdentifier(indexColumnName)).getColumnId();
             IndexColumn[] indexCols = IndexColumn.wrap(
                     new Column[] { cols[indexColumn] });
             metaIndex = new MetaIndex(this, indexCols, false);
         }
     }
 
+    private void setMetaTableName(String upperName) {
+        setObjectName(database.sysIdentifier(upperName));
+    }
+
     private Column[] createColumns(String... names) {
         Column[] cols = new Column[names.length];
+        int defaultType = database.getSettings().caseInsensitiveIdentifiers ? Value.VARCHAR_IGNORECASE : Value.VARCHAR;
         for (int i = 0; i < names.length; i++) {
             String nameType = names[i];
             int idx = nameType.indexOf(' ');
             int dataType;
             String name;
             if (idx < 0) {
-                dataType = database.getMode().lowerCaseIdentifiers ?
-                        Value.STRING_IGNORECASE : Value.STRING;
+                dataType = defaultType;
                 name = nameType;
             } else {
-                dataType = DataType.getTypeByName(nameType.substring(idx + 1)).type;
+                dataType = DataType.getTypeByName(nameType.substring(idx + 1), database.getMode()).type;
                 name = nameType.substring(0, idx);
             }
-            cols[i] = new Column(name, dataType);
+            cols[i] = new Column(database.sysIdentifier(name), dataType);
         }
         return cols;
-    }
-
-    @Override
-    public String getDropSQL() {
-        return null;
     }
 
     @Override
@@ -619,7 +732,7 @@ public class MetaTable extends Table {
     }
 
     private String identifier(String s) {
-        if (database.getMode().lowerCaseIdentifiers) {
+        if (database.getSettings().databaseToLower) {
             s = s == null ? null : StringUtils.toLowerEnglish(s);
         }
         return s;
@@ -633,9 +746,6 @@ public class MetaTable extends Table {
     }
 
     private ArrayList<Table> getTablesByName(Session session, String tableName) {
-        if (database.getMode().lowerCaseIdentifiers) {
-            tableName = StringUtils.toUpperEnglish(tableName);
-        }
         ArrayList<Table> tables = database.getTableOrViewByName(tableName);
         for (Table temp : session.getLocalTempTables()) {
             if (temp.getName().equals(tableName)) {
@@ -650,17 +760,16 @@ public class MetaTable extends Table {
         if (value == null || (indexFrom == null && indexTo == null)) {
             return true;
         }
-        Database db = session.getDatabase();
         Value v;
-        if (database.getMode().lowerCaseIdentifiers) {
+        if (database.getSettings().caseInsensitiveIdentifiers) {
             v = ValueStringIgnoreCase.get(value);
         } else {
             v = ValueString.get(value);
         }
-        if (indexFrom != null && db.compare(v, indexFrom) < 0) {
+        if (indexFrom != null && session.compare(v, indexFrom) < 0) {
             return false;
         }
-        if (indexTo != null && db.compare(v, indexTo) > 0) {
+        if (indexTo != null && session.compare(v, indexTo) > 0) {
             return false;
         }
         return true;
@@ -696,13 +805,13 @@ public class MetaTable extends Table {
             }
         }
 
-        ArrayList<Row> rows = New.arrayList();
-        String catalog = identifier(database.getShortName());
+        ArrayList<Row> rows = Utils.newSmallArrayList();
+        String catalog = database.getShortName();
         boolean admin = session.getUser().isAdmin();
         switch (type) {
         case TABLES: {
             for (Table table : getAllTables(session)) {
-                String tableName = identifier(table.getName());
+                String tableName = table.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
@@ -722,16 +831,17 @@ public class MetaTable extends Table {
                 }
                 String sql = table.getCreateSQL();
                 if (!admin) {
-                    if (sql != null && sql.contains(JdbcSQLException.HIDE_SQL)) {
+                    if (sql != null && sql.contains(DbException.HIDE_SQL)) {
                         // hide the password of linked tables
                         sql = "-";
                     }
                 }
-                add(rows,
+                add(session,
+                        rows,
                         // TABLE_CATALOG
                         catalog,
                         // TABLE_SCHEMA
-                        identifier(table.getSchema().getName()),
+                        table.getSchema().getName(),
                         // TABLE_NAME
                         tableName,
                         // TABLE_TYPE
@@ -743,15 +853,14 @@ public class MetaTable extends Table {
                         // REMARKS
                         replaceNullWithEmpty(table.getComment()),
                         // LAST_MODIFICATION
-                        "" + table.getMaxDataModificationId(),
+                        ValueLong.get(table.getMaxDataModificationId()),
                         // ID
-                        "" + table.getId(),
+                        ValueInt.get(table.getId()),
                         // TYPE_NAME
                         null,
                         // TABLE_CLASS
-                        table.getClass().getName(),
-                        // ROW_COUNT_ESTIMATE
-                        "" + table.getRowCountApproximation()
+                        table.getClass().getName(), // ROW_COUNT_ESTIMATE
+                        ValueLong.get(table.getRowCountApproximation())
                 );
             }
             break;
@@ -760,14 +869,17 @@ public class MetaTable extends Table {
             // reduce the number of tables to scan - makes some metadata queries
             // 10x faster
             final ArrayList<Table> tablesToList;
-            if (indexFrom != null && indexTo != null && indexFrom.equals(indexTo)) {
-                String tableName = identifier(indexFrom.getString());
+            if (indexFrom != null && indexFrom.equals(indexTo)) {
+                String tableName = indexFrom.getString();
+                if (tableName == null) {
+                    break;
+                }
                 tablesToList = getTablesByName(session, tableName);
             } else {
                 tablesToList = getAllTables(session);
             }
             for (Table table : tablesToList) {
-                String tableName = identifier(table.getName());
+                String tableName = table.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
@@ -778,56 +890,100 @@ public class MetaTable extends Table {
                 String collation = database.getCompareMode().getName();
                 for (int j = 0; j < cols.length; j++) {
                     Column c = cols[j];
+                    Domain domain = c.getDomain();
+                    DataType dataType = c.getDataType();
+                    ValueInt precision = ValueInt.get(c.getPrecisionAsInt());
+                    ValueInt scale = ValueInt.get(c.getType().getScale());
                     Sequence sequence = c.getSequence();
-                    add(rows,
+                    boolean hasDateTimePrecision;
+                    int type = dataType.type;
+                    switch (type) {
+                    case Value.TIME:
+                    case Value.TIME_TZ:
+                    case Value.DATE:
+                    case Value.TIMESTAMP:
+                    case Value.TIMESTAMP_TZ:
+                    case Value.INTERVAL_SECOND:
+                    case Value.INTERVAL_DAY_TO_SECOND:
+                    case Value.INTERVAL_HOUR_TO_SECOND:
+                    case Value.INTERVAL_MINUTE_TO_SECOND:
+                        hasDateTimePrecision = true;
+                        break;
+                    default:
+                        hasDateTimePrecision = false;
+                    }
+                    boolean isGenerated = c.getGenerated();
+                    boolean isInterval = DataType.isIntervalType(type);
+                    String createSQLWithoutName = c.getCreateSQLWithoutName();
+                    add(session,
+                            rows,
                             // TABLE_CATALOG
                             catalog,
                             // TABLE_SCHEMA
-                            identifier(table.getSchema().getName()),
+                            table.getSchema().getName(),
                             // TABLE_NAME
                             tableName,
                             // COLUMN_NAME
-                            identifier(c.getName()),
+                            c.getName(),
                             // ORDINAL_POSITION
-                            String.valueOf(j + 1),
+                            ValueInt.get(j + 1),
                             // COLUMN_DEFAULT
-                            c.getDefaultSQL(),
+                            isGenerated ? null : c.getDefaultSQL(),
                             // IS_NULLABLE
                             c.isNullable() ? "YES" : "NO",
                             // DATA_TYPE
-                            "" + DataType.convertTypeToSQLType(c.getType()),
+                            ValueInt.get(dataType.sqlType),
                             // CHARACTER_MAXIMUM_LENGTH
-                            "" + c.getPrecisionAsInt(),
+                            precision,
                             // CHARACTER_OCTET_LENGTH
-                            "" + c.getPrecisionAsInt(),
+                            precision,
                             // NUMERIC_PRECISION
-                            "" + c.getPrecisionAsInt(),
+                            precision,
                             // NUMERIC_PRECISION_RADIX
-                            "10",
+                            ValueInt.get(10),
                             // NUMERIC_SCALE
-                            "" + c.getScale(),
+                            scale,
+                            // DATETIME_PRECISION
+                            hasDateTimePrecision ? scale : null,
+                            // INTERVAL_TYPE
+                            isInterval ? createSQLWithoutName.substring(9) : null,
+                            // INTERVAL_PRECISION
+                            isInterval ? precision : null,
                             // CHARACTER_SET_NAME
                             CHARACTER_SET_NAME,
                             // COLLATION_NAME
                             collation,
+                            // DOMAIN_CATALOG
+                            domain != null ? catalog : null,
+                            // DOMAIN_SCHEMA
+                            domain != null ? domain.getSchema().getName() : null,
+                            // DOMAIN_NAME
+                            domain != null ? domain.getName() : null,
+                            // IS_GENERATED
+                            isGenerated ? "ALWAYS" : "NEVER",
+                            // GENERATION_EXPRESSION
+                            isGenerated ? c.getDefaultSQL() : null,
                             // TYPE_NAME
-                            identifier(DataType.getDataType(c.getType()).name),
+                            identifier(isInterval ? "INTERVAL" : dataType.name),
                             // NULLABLE
-                            "" + (c.isNullable() ?
-                                    DatabaseMetaData.columnNullable :
-                                    DatabaseMetaData.columnNoNulls) ,
+                            ValueInt.get(c.isNullable()
+                                    ? DatabaseMetaData.columnNullable : DatabaseMetaData.columnNoNulls),
                             // IS_COMPUTED
-                            "" + (c.getComputed() ? "TRUE" : "FALSE"),
+                            ValueBoolean.get(isGenerated),
                             // SELECTIVITY
-                            "" + (c.getSelectivity()),
-                            // CHECK_CONSTRAINT
-                            c.getCheckConstraintSQL(session, c.getName()),
+                            ValueInt.get(c.getSelectivity()),
                             // SEQUENCE_NAME
                             sequence == null ? null : sequence.getName(),
                             // REMARKS
                             replaceNullWithEmpty(c.getComment()),
                             // SOURCE_DATA_TYPE
-                            null
+                            // SMALLINT
+                            null,
+                            // COLUMN_TYPE
+                            createSQLWithoutName,
+                            // COLUMN_ON_UPDATE
+                            c.getOnUpdateSQL(), // IS_VISIBLE
+                            ValueBoolean.get(c.getVisible())
                     );
                 }
             }
@@ -837,14 +993,17 @@ public class MetaTable extends Table {
             // reduce the number of tables to scan - makes some metadata queries
             // 10x faster
             final ArrayList<Table> tablesToList;
-            if (indexFrom != null && indexTo != null && indexFrom.equals(indexTo)) {
-                String tableName = identifier(indexFrom.getString());
+            if (indexFrom != null && indexFrom.equals(indexTo)) {
+                String tableName = indexFrom.getString();
+                if (tableName == null) {
+                    break;
+                }
                 tablesToList = getTablesByName(session, tableName);
             } else {
                 tablesToList = getAllTables(session);
             }
             for (Table table : tablesToList) {
-                String tableName = identifier(table.getName());
+                String tableName = table.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
@@ -863,8 +1022,7 @@ public class MetaTable extends Table {
                         Constraint constraint = constraints.get(k);
                         if (constraint.usesIndex(index)) {
                             if (index.getIndexType().isPrimaryKey()) {
-                                if (constraint.getConstraintType().equals(
-                                        Constraint.PRIMARY_KEY)) {
+                                if (constraint.getConstraintType() == Constraint.Type.PRIMARY_KEY) {
                                     constraintName = constraint.getName();
                                 }
                             } else {
@@ -873,49 +1031,40 @@ public class MetaTable extends Table {
                         }
                     }
                     IndexColumn[] cols = index.getIndexColumns();
-                    String indexClass;
-                    if (index instanceof MultiVersionIndex) {
-                        indexClass = ((MultiVersionIndex) index).
-                                getBaseIndex().getClass().getName();
-                    } else {
-                        indexClass = index.getClass().getName();
-                    }
+                    String indexClass = index.getClass().getName();
                     for (int k = 0; k < cols.length; k++) {
                         IndexColumn idxCol = cols[k];
                         Column column = idxCol.column;
-                        add(rows,
+                        add(session,
+                                rows,
                                 // TABLE_CATALOG
                                 catalog,
                                 // TABLE_SCHEMA
-                                identifier(table.getSchema().getName()),
+                                table.getSchema().getName(),
                                 // TABLE_NAME
                                 tableName,
                                 // NON_UNIQUE
-                                index.getIndexType().isUnique() ?
-                                        "FALSE" : "TRUE",
+                                ValueBoolean.get(!index.getIndexType().isUnique()),
                                 // INDEX_NAME
-                                identifier(index.getName()),
+                                index.getName(),
                                 // ORDINAL_POSITION
-                                "" + (k+1),
+                                ValueShort.get((short) (k + 1)),
                                 // COLUMN_NAME
-                                identifier(column.getName()),
+                                column.getName(),
                                 // CARDINALITY
-                                "0",
+                                ValueInt.get(0),
                                 // PRIMARY_KEY
-                                index.getIndexType().isPrimaryKey() ?
-                                        "TRUE" : "FALSE",
+                                ValueBoolean.get(index.getIndexType().isPrimaryKey()),
                                 // INDEX_TYPE_NAME
                                 index.getIndexType().getSQL(),
                                 // IS_GENERATED
-                                index.getIndexType().getBelongsToConstraint() ?
-                                        "TRUE" : "FALSE",
+                                ValueBoolean.get(index.getIndexType().getBelongsToConstraint()),
                                 // INDEX_TYPE
-                                "" + DatabaseMetaData.tableIndexOther,
+                                ValueShort.get(DatabaseMetaData.tableIndexOther),
                                 // ASC_OR_DESC
-                                (idxCol.sortType & SortOrder.DESCENDING) != 0 ?
-                                        "D" : "A",
+                                (idxCol.sortType & SortOrder.DESCENDING) != 0 ? "D" : "A",
                                 // PAGES
-                                "0",
+                                ValueInt.get(0),
                                 // FILTER_CONDITION
                                 "",
                                 // REMARKS
@@ -923,16 +1072,12 @@ public class MetaTable extends Table {
                                 // SQL
                                 index.getCreateSQL(),
                                 // ID
-                                "" + index.getId(),
+                                ValueInt.get(index.getId()),
                                 // SORT_TYPE
-                                "" + idxCol.sortType,
+                                ValueInt.get(idxCol.sortType),
                                 // CONSTRAINT_NAME
-                                constraintName,
-                                // INDEX_CLASS
-                                indexClass,
-                                // AFFINITY
-                                index.getIndexType().isAffinity() ?
-                                        "TRUE" : "FALSE"
+                                constraintName, // INDEX_CLASS
+                                indexClass
                             );
                     }
                 }
@@ -940,104 +1085,11 @@ public class MetaTable extends Table {
             break;
         }
         case TABLE_TYPES: {
-            add(rows, TableType.TABLE.toString());
-            add(rows, TableType.TABLE_LINK.toString());
-            add(rows, TableType.SYSTEM_TABLE.toString());
-            add(rows, TableType.VIEW.toString());
-            add(rows, TableType.EXTERNAL_TABLE_ENGINE.toString());
-            break;
-        }
-        case CATALOGS: {
-            add(rows, catalog);
-            break;
-        }
-        case SETTINGS: {
-            for (Setting s : database.getAllSettings()) {
-                String value = s.getStringValue();
-                if (value == null) {
-                    value = "" + s.getIntValue();
-                }
-                add(rows,
-                        identifier(s.getName()),
-                        value
-                );
-            }
-            add(rows, "info.BUILD_ID", "" + Constants.BUILD_ID);
-            add(rows, "info.VERSION_MAJOR", "" + Constants.VERSION_MAJOR);
-            add(rows, "info.VERSION_MINOR", "" + Constants.VERSION_MINOR);
-            add(rows, "info.VERSION", "" + Constants.getFullVersion());
-            if (admin) {
-                String[] settings = {
-                        "java.runtime.version", "java.vm.name",
-                        "java.vendor", "os.name", "os.arch", "os.version",
-                        "sun.os.patch.level", "file.separator",
-                        "path.separator", "line.separator", "user.country",
-                        "user.language", "user.variant", "file.encoding"                };
-                for (String s : settings) {
-                    add(rows, "property." + s, Utils.getProperty(s, ""));
-                }
-            }
-            add(rows, "EXCLUSIVE", database.getExclusiveSession() == null ?
-                    "FALSE" : "TRUE");
-            add(rows, "MODE", database.getMode().getName());
-            add(rows, "MULTI_THREADED", database.isMultiThreaded() ? "1" : "0");
-            add(rows, "MVCC", database.isMultiVersion() ? "TRUE" : "FALSE");
-            add(rows, "QUERY_TIMEOUT", "" + session.getQueryTimeout());
-            add(rows, "RETENTION_TIME", "" + database.getRetentionTime());
-            add(rows, "LOG", "" + database.getLogMode());
-            // database settings
-            ArrayList<String> settingNames = New.arrayList();
-            HashMap<String, String> s = database.getSettings().getSettings();
-            for (String k : s.keySet()) {
-                settingNames.add(k);
-            }
-            Collections.sort(settingNames);
-            for (String k : settingNames) {
-                add(rows, k, s.get(k));
-            }
-            if (database.isPersistent()) {
-                PageStore store = database.getPageStore();
-                if (store != null) {
-                    add(rows, "info.FILE_WRITE_TOTAL",
-                            "" + store.getWriteCountTotal());
-                    add(rows, "info.FILE_WRITE",
-                            "" + store.getWriteCount());
-                    add(rows, "info.FILE_READ",
-                            "" + store.getReadCount());
-                    add(rows, "info.PAGE_COUNT",
-                            "" + store.getPageCount());
-                    add(rows, "info.PAGE_SIZE",
-                            "" + store.getPageSize());
-                    add(rows, "info.CACHE_MAX_SIZE",
-                            "" + store.getCache().getMaxMemory());
-                    add(rows, "info.CACHE_SIZE",
-                            "" + store.getCache().getMemory());
-                }
-                Store mvStore = database.getMvStore();
-                if (mvStore != null) {
-                    FileStore fs = mvStore.getStore().getFileStore();
-                    add(rows, "info.FILE_WRITE", "" +
-                            fs.getWriteCount());
-                    add(rows, "info.FILE_READ", "" +
-                            fs.getReadCount());
-                    long size;
-                    try {
-                        size = fs.getFile().size();
-                    } catch (IOException e) {
-                        throw DbException.convertIOException(e, "Can not get size");
-                    }
-                    int pageSize = 4 * 1024;
-                    long pageCount = size / pageSize;
-                    add(rows, "info.PAGE_COUNT", "" +
-                            pageCount);
-                    add(rows, "info.PAGE_SIZE", "" +
-                            pageSize);
-                    add(rows, "info.CACHE_MAX_SIZE", "" +
-                            mvStore.getStore().getCacheSize());
-                    add(rows, "info.CACHE_SIZE", "" +
-                            mvStore.getStore().getCacheSizeUsed());
-                }
-            }
+            add(session, rows, TableType.TABLE.toString());
+            add(session, rows, TableType.TABLE_LINK.toString());
+            add(session, rows, TableType.SYSTEM_TABLE.toString());
+            add(session, rows, TableType.VIEW.toString());
+            add(session, rows, TableType.EXTERNAL_TABLE_ENGINE.toString());
             break;
         }
         case TYPE_INFO: {
@@ -1045,13 +1097,14 @@ public class MetaTable extends Table {
                 if (t.hidden || t.sqlType == Value.NULL) {
                     continue;
                 }
-                add(rows,
+                add(session,
+                        rows,
                         // TYPE_NAME
                         t.name,
                         // DATA_TYPE
-                        String.valueOf(t.sqlType),
+                        ValueInt.get(t.sqlType),
                         // PRECISION
-                        String.valueOf(MathUtils.convertLongToInt(t.maxPrecision)),
+                        ValueInt.get(MathUtils.convertLongToInt(t.maxPrecision)),
                         // PREFIX
                         t.prefix,
                         // SUFFIX
@@ -1059,22 +1112,127 @@ public class MetaTable extends Table {
                         // PARAMS
                         t.params,
                         // AUTO_INCREMENT
-                        String.valueOf(t.autoIncrement),
+                        ValueBoolean.get(t.autoIncrement),
                         // MINIMUM_SCALE
-                        String.valueOf(t.minScale),
+                        ValueShort.get(MathUtils.convertIntToShort(t.minScale)),
                         // MAXIMUM_SCALE
-                        String.valueOf(t.maxScale),
+                        ValueShort.get(MathUtils.convertIntToShort(t.maxScale)),
                         // RADIX
-                        t.decimal ? "10" : null,
+                        t.decimal ? ValueInt.get(10) : null,
                         // POS
-                        String.valueOf(t.sqlTypePos),
+                        ValueInt.get(t.sqlTypePos),
                         // CASE_SENSITIVE
-                        String.valueOf(t.caseSensitive),
+                        ValueBoolean.get(t.caseSensitive),
                         // NULLABLE
-                        "" + DatabaseMetaData.typeNullable,
-                        // SEARCHABLE
-                        "" + DatabaseMetaData.typeSearchable
+                        ValueShort.get((short) DatabaseMetaData.typeNullable), // SEARCHABLE
+                        ValueShort.get((short) DatabaseMetaData.typeSearchable)
                 );
+            }
+            break;
+        }
+        case CATALOGS: {
+            add(session, rows, catalog);
+            break;
+        }
+        case SETTINGS: {
+            for (Setting s : database.getAllSettings()) {
+                String value = s.getStringValue();
+                if (value == null) {
+                    value = Integer.toString(s.getIntValue());
+                }
+                add(session,
+                        rows,
+                        identifier(s.getName()), value
+                );
+            }
+            add(session, rows, "info.BUILD_ID", "" + Constants.BUILD_ID);
+            add(session, rows, "info.VERSION_MAJOR", "" + Constants.VERSION_MAJOR);
+            add(session, rows, "info.VERSION_MINOR", "" + Constants.VERSION_MINOR);
+            add(session, rows, "info.VERSION", Constants.FULL_VERSION);
+            if (admin) {
+                String[] settings = {
+                        "java.runtime.version", "java.vm.name",
+                        "java.vendor", "os.name", "os.arch", "os.version",
+                        "sun.os.patch.level", "file.separator",
+                        "path.separator", "line.separator", "user.country",
+                        "user.language", "user.variant", "file.encoding" };
+                for (String s : settings) {
+                    add(session, rows, "property." + s, Utils.getProperty(s, ""));
+                }
+            }
+            add(session, rows, "EXCLUSIVE", database.getExclusiveSession() == null ?
+                    "FALSE" : "TRUE");
+            add(session, rows, "MODE", database.getMode().getName());
+            add(session, rows, "QUERY_TIMEOUT", Integer.toString(session.getQueryTimeout()));
+            add(session, rows, "TIME ZONE", session.currentTimeZone().getId());
+            BitSet nonKeywords = session.getNonKeywords();
+            if (nonKeywords != null) {
+                add(session, rows, "NON_KEYWORDS", Parser.formatNonKeywords(nonKeywords));
+            }
+            add(session, rows, "RETENTION_TIME", Integer.toString(database.getRetentionTime()));
+            add(session, rows, "LOG", Integer.toString(database.getLogMode()));
+            // database settings
+            for (Map.Entry<String, String> entry : database.getSettings().getSortedSettings()) {
+                add(session, rows, entry.getKey(), entry.getValue());
+            }
+            if (database.isPersistent()) {
+                PageStore pageStore = database.getPageStore();
+                if (pageStore != null) {
+                    add(session, rows,
+                            "info.FILE_WRITE_TOTAL", Long.toString(pageStore.getWriteCountTotal()));
+                    add(session, rows,
+                            "info.FILE_WRITE", Long.toString(pageStore.getWriteCount()));
+                    add(session, rows,
+                            "info.FILE_READ", Long.toString(pageStore.getReadCount()));
+                    add(session, rows,
+                            "info.PAGE_COUNT", Integer.toString(pageStore.getPageCount()));
+                    add(session, rows,
+                            "info.PAGE_SIZE", Integer.toString(pageStore.getPageSize()));
+                    add(session, rows,
+                            "info.CACHE_MAX_SIZE", Integer.toString(pageStore.getCache().getMaxMemory()));
+                    add(session, rows,
+                            "info.CACHE_SIZE", Integer.toString(pageStore.getCache().getMemory()));
+                }
+                Store store = database.getStore();
+                if (store != null) {
+                    MVStore mvStore = store.getMvStore();
+                    FileStore fs = mvStore.getFileStore();
+                    if (fs != null) {
+                        add(session, rows,
+                                "info.FILE_WRITE", Long.toString(fs.getWriteCount()));
+                        add(session, rows,
+                                "info.FILE_WRITE_BYTES", Long.toString(fs.getWriteBytes()));
+                        add(session, rows,
+                                "info.FILE_READ", Long.toString(fs.getReadCount()));
+                        add(session, rows,
+                                "info.FILE_READ_BYTES", Long.toString(fs.getReadBytes()));
+                        add(session, rows,
+                                "info.UPDATE_FAILURE_PERCENT",
+                                String.format(Locale.ENGLISH, "%.2f%%", 100 * mvStore.getUpdateFailureRatio()));
+                        add(session, rows,
+                                "info.FILL_RATE", Integer.toString(mvStore.getFillRate()));
+                        add(session, rows,
+                                "info.CHUNKS_FILL_RATE", Integer.toString(mvStore.getChunksFillRate()));
+                        try {
+                            add(session, rows,
+                                    "info.FILE_SIZE", Long.toString(fs.getFile().size()));
+                        } catch (IOException ignore) {/**/}
+                        add(session, rows,
+                                "info.CHUNK_COUNT", Long.toString(mvStore.getChunkCount()));
+                        add(session, rows,
+                                "info.PAGE_COUNT", Long.toString(mvStore.getPageCount()));
+                        add(session, rows,
+                                "info.PAGE_COUNT_LIVE", Long.toString(mvStore.getLivePageCount()));
+                        add(session, rows,
+                                "info.PAGE_SIZE", Integer.toString(mvStore.getPageSplitSize()));
+                        add(session, rows,
+                                "info.CACHE_MAX_SIZE", Integer.toString(mvStore.getCacheSize()));
+                        add(session, rows,
+                                "info.CACHE_SIZE", Integer.toString(mvStore.getCacheSizeUsed()));
+                        add(session, rows,
+                                "info.CACHE_HIT_RATIO", Integer.toString(mvStore.getCacheHitRatio()));
+                    }
+                }
             }
             break;
         }
@@ -1088,16 +1246,16 @@ public class MetaTable extends Table {
                 csv.setLineCommentCharacter('#');
                 ResultSet rs = csv.read(reader, null);
                 for (int i = 0; rs.next(); i++) {
-                    add(rows,
+                    add(session,
+                        rows,
                         // ID
-                        String.valueOf(i),
+                        ValueInt.get(i),
                         // SECTION
                         rs.getString(1).trim(),
                         // TOPIC
                         rs.getString(2).trim(),
                         // SYNTAX
-                        rs.getString(3).trim(),
-                        // TEXT
+                        rs.getString(3).trim(), // TEXT
                         rs.getString(4).trim()
                     );
                 }
@@ -1107,34 +1265,43 @@ public class MetaTable extends Table {
             break;
         }
         case SEQUENCES: {
-            for (SchemaObject obj : database.getAllSchemaObjects(
-                    DbObject.SEQUENCE)) {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.SEQUENCE)) {
                 Sequence s = (Sequence) obj;
-                add(rows,
+                add(session,
+                        rows,
                         // SEQUENCE_CATALOG
                         catalog,
                         // SEQUENCE_SCHEMA
-                        identifier(s.getSchema().getName()),
+                        s.getSchema().getName(),
                         // SEQUENCE_NAME
-                        identifier(s.getName()),
-                        // CURRENT_VALUE
-                        String.valueOf(s.getCurrentValue()),
+                        s.getName(),
+                        // DATA_TYPE
+                        "BIGINT",
+                        // NUMERIC_PRECISION
+                        ValueInt.get(ValueLong.PRECISION),
+                        // NUMERIC_PRECISION_RADIX
+                        ValueInt.get(10),
+                        // NUMERIC_SCALE
+                        ValueInt.get(0),
+                        // START_VALUE
+                        ValueLong.get(s.getStartValue()),
+                        // MINIMUM_VALUE
+                        ValueLong.get(s.getMinValue()),
+                        // MAXIMUM_VALUE
+                        ValueLong.get(s.getMaxValue()),
                         // INCREMENT
-                        String.valueOf(s.getIncrement()),
+                        ValueLong.get(s.getIncrement()),
+                        // CYCLE_OPTION
+                        s.getCycle() ? "YES" : "NO",
+                        // CURRENT_VALUE
+                        ValueLong.get(s.getCurrentValue()),
                         // IS_GENERATED
-                        s.getBelongsToTable() ? "TRUE" : "FALSE",
+                        ValueBoolean.get(s.getBelongsToTable()),
                         // REMARKS
                         replaceNullWithEmpty(s.getComment()),
                         // CACHE
-                        String.valueOf(s.getCacheSize()),
-                        // MIN_VALUE
-                        String.valueOf(s.getMinValue()),
-                        // MAX_VALUE
-                        String.valueOf(s.getMaxValue()),
-                        // IS_CYCLE
-                        s.getCycle() ? "TRUE" : "FALSE",
-                        // ID
-                        "" + s.getId()
+                        ValueLong.get(s.getCacheSize()), // ID
+                        ValueInt.get(s.getId())
                     );
             }
             break;
@@ -1142,15 +1309,15 @@ public class MetaTable extends Table {
         case USERS: {
             for (User u : database.getAllUsers()) {
                 if (admin || session.getUser() == u) {
-                    add(rows,
+                    add(session,
+                            rows,
                             // NAME
                             identifier(u.getName()),
                             // ADMIN
                             String.valueOf(u.isAdmin()),
                             // REMARKS
-                            replaceNullWithEmpty(u.getComment()),
-                            // ID
-                            "" + u.getId()
+                            replaceNullWithEmpty(u.getComment()), // ID
+                            ValueInt.get(u.getId())
                     );
                 }
             }
@@ -1159,13 +1326,13 @@ public class MetaTable extends Table {
         case ROLES: {
             for (Role r : database.getAllRoles()) {
                 if (admin || session.getUser().isRoleGranted(r)) {
-                    add(rows,
+                    add(session,
+                            rows,
                             // NAME
                             identifier(r.getName()),
                             // REMARKS
-                            replaceNullWithEmpty(r.getComment()),
-                            // ID
-                            "" + r.getId()
+                            replaceNullWithEmpty(r.getComment()), // ID
+                            ValueInt.get(r.getId())
                     );
                 }
             }
@@ -1176,8 +1343,7 @@ public class MetaTable extends Table {
                 for (Right r : database.getAllRights()) {
                     Role role = r.getGrantedRole();
                     DbObject grantee = r.getGrantee();
-                    String rightType = grantee.getType() == DbObject.USER ?
-                            "USER" : "ROLE";
+                    String rightType = grantee.getType() == DbObject.USER ? "USER" : "ROLE";
                     if (role == null) {
                         DbObject object = r.getGrantedObject();
                         Schema schema = null;
@@ -1190,12 +1356,13 @@ public class MetaTable extends Table {
                                 schema = table.getSchema();
                             }
                         }
-                        String tableName = (table != null) ? identifier(table.getName()) : "";
-                        String schemaName = (schema != null) ? identifier(schema.getName()) : "";
+                        String tableName = (table != null) ? table.getName() : "";
+                        String schemaName = (schema != null) ? schema.getName() : "";
                         if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                             continue;
                         }
-                        add(rows,
+                        add(session,
+                                rows,
                                 // GRANTEE
                                 identifier(grantee.getName()),
                                 // GRANTEETYPE
@@ -1207,12 +1374,12 @@ public class MetaTable extends Table {
                                 // TABLE_SCHEMA
                                 schemaName,
                                 // TABLE_NAME
-                                tableName,
-                                // ID
-                                "" + r.getId()
+                                tableName, // ID
+                                ValueInt.get(r.getId())
                         );
                     } else {
-                        add(rows,
+                        add(session,
+                                rows,
                                 // GRANTEE
                                 identifier(grantee.getName()),
                                 // GRANTEETYPE
@@ -1224,9 +1391,8 @@ public class MetaTable extends Table {
                                 // TABLE_SCHEMA
                                 "",
                                 // TABLE_NAME
-                                "",
-                                // ID
-                                "" + r.getId()
+                                "", // ID
+                                ValueInt.get(r.getId())
                         );
                     }
                 }
@@ -1244,64 +1410,64 @@ public class MetaTable extends Table {
                     methods = new JavaMethod[0];
                 }
                 for (FunctionAlias.JavaMethod method : methods) {
-                    int returnsResult = method.getDataType() == Value.NULL ?
-                            DatabaseMetaData.procedureNoResult :
-                            DatabaseMetaData.procedureReturnsResult;
-                    add(rows,
+                    add(session,
+                            rows,
                             // ALIAS_CATALOG
                             catalog,
                             // ALIAS_SCHEMA
                             alias.getSchema().getName(),
                             // ALIAS_NAME
-                            identifier(alias.getName()),
+                            alias.getName(),
                             // JAVA_CLASS
                             alias.getJavaClassName(),
                             // JAVA_METHOD
                             alias.getJavaMethodName(),
                             // DATA_TYPE
-                            "" + DataType.convertTypeToSQLType(method.getDataType()),
+                            ValueInt.get(DataType.convertTypeToSQLType(method.getDataType())),
                             // TYPE_NAME
                             DataType.getDataType(method.getDataType()).name,
-                            // COLUMN_COUNT INT
-                            "" + method.getParameterCount(),
-                            // RETURNS_RESULT SMALLINT
-                            "" + returnsResult,
+                            // COLUMN_COUNT
+                            ValueInt.get(method.getParameterCount()),
+                            // RETURNS_RESULT
+                            ValueShort.get(method.getDataType() == Value.NULL
+                                    ? (short) DatabaseMetaData.procedureNoResult
+                                    : (short) DatabaseMetaData.procedureReturnsResult),
                             // REMARKS
                             replaceNullWithEmpty(alias.getComment()),
                             // ID
-                            "" + alias.getId(),
-                            // SOURCE
+                            ValueInt.get(alias.getId())
+, // SOURCE
                             alias.getSource()
                             // when adding more columns, see also below
                     );
                 }
             }
             for (UserAggregate agg : database.getAllAggregates()) {
-                int returnsResult = DatabaseMetaData.procedureReturnsResult;
-                add(rows,
+                add(session,
+                        rows,
                         // ALIAS_CATALOG
                         catalog,
                         // ALIAS_SCHEMA
-                        Constants.SCHEMA_MAIN,
+                        database.getMainSchema().getName(),
                         // ALIAS_NAME
-                        identifier(agg.getName()),
+                        agg.getName(),
                         // JAVA_CLASS
                         agg.getJavaClassName(),
                         // JAVA_METHOD
                         "",
                         // DATA_TYPE
-                        "" + DataType.convertTypeToSQLType(Value.NULL),
+                        ValueInt.get(Types.NULL),
                         // TYPE_NAME
                         DataType.getDataType(Value.NULL).name,
-                        // COLUMN_COUNT INT
-                        "1",
-                        // RETURNS_RESULT SMALLINT
-                        "" + returnsResult,
+                        // COLUMN_COUNT
+                        ValueInt.get(1),
+                        // RETURNS_RESULT
+                        ValueShort.get((short) DatabaseMetaData.procedureReturnsResult),
                         // REMARKS
                         replaceNullWithEmpty(agg.getComment()),
                         // ID
-                        "" + agg.getId(),
-                        // SOURCE
+                        ValueInt.get(agg.getId())
+, // SOURCE
                         ""
                         // when adding more columns, see also below
                 );
@@ -1322,40 +1488,40 @@ public class MetaTable extends Table {
                     // Add return column index 0
                     if (method.getDataType() != Value.NULL) {
                         DataType dt = DataType.getDataType(method.getDataType());
-                        add(rows,
+                        add(session,
+                                rows,
                                 // ALIAS_CATALOG
                                 catalog,
                                 // ALIAS_SCHEMA
                                 alias.getSchema().getName(),
                                 // ALIAS_NAME
-                                identifier(alias.getName()),
+                                alias.getName(),
                                 // JAVA_CLASS
                                 alias.getJavaClassName(),
                                 // JAVA_METHOD
                                 alias.getJavaMethodName(),
                                 // COLUMN_COUNT
-                                "" + method.getParameterCount(),
-                                // POS INT
-                                "0",
+                                ValueInt.get(method.getParameterCount()),
+                                // POS
+                                ValueInt.get(0),
                                 // COLUMN_NAME
                                 "P0",
                                 // DATA_TYPE
-                                "" + DataType.convertTypeToSQLType(method.getDataType()),
+                                ValueInt.get(DataType.convertTypeToSQLType(method.getDataType())),
                                 // TYPE_NAME
                                 dt.name,
-                                // PRECISION INT
-                                "" + MathUtils.convertLongToInt(dt.defaultPrecision),
+                                // PRECISION
+                                ValueInt.get(MathUtils.convertLongToInt(dt.defaultPrecision)),
                                 // SCALE
-                                "" + dt.defaultScale,
+                                ValueShort.get(MathUtils.convertIntToShort(dt.defaultScale)),
                                 // RADIX
-                                "10",
-                                // NULLABLE SMALLINT
-                                "" + DatabaseMetaData.columnNullableUnknown,
+                                ValueShort.get((short) 10),
+                                // NULLABLE
+                                ValueShort.get((short) DatabaseMetaData.columnNullableUnknown),
                                 // COLUMN_TYPE
-                                "" + DatabaseMetaData.procedureColumnReturn,
+                                ValueShort.get((short) DatabaseMetaData.procedureColumnReturn),
                                 // REMARKS
-                                "",
-                                // COLUMN_DEFAULT
+                                "", // COLUMN_DEFAULT
                                 null
                         );
                     }
@@ -1367,42 +1533,42 @@ public class MetaTable extends Table {
                         Class<?> clazz = columnList[k];
                         int dataType = DataType.getTypeFromClass(clazz);
                         DataType dt = DataType.getDataType(dataType);
-                        int nullable = clazz.isPrimitive() ? DatabaseMetaData.columnNoNulls
-                                : DatabaseMetaData.columnNullable;
-                        add(rows,
+                        add(session,
+                                rows,
                                 // ALIAS_CATALOG
                                 catalog,
                                 // ALIAS_SCHEMA
                                 alias.getSchema().getName(),
                                 // ALIAS_NAME
-                                identifier(alias.getName()),
+                                alias.getName(),
                                 // JAVA_CLASS
                                 alias.getJavaClassName(),
                                 // JAVA_METHOD
                                 alias.getJavaMethodName(),
                                 // COLUMN_COUNT
-                                "" + method.getParameterCount(),
-                                // POS INT
-                                "" + (k + (method.hasConnectionParam() ? 0 : 1)),
+                                ValueInt.get(method.getParameterCount()),
+                                // POS
+                                ValueInt.get(k + (method.hasConnectionParam() ? 0 : 1)),
                                 // COLUMN_NAME
                                 "P" + (k + 1),
                                 // DATA_TYPE
-                                "" + DataType.convertTypeToSQLType(dt.type),
+                                ValueInt.get(DataType.convertTypeToSQLType(dt.type)),
                                 // TYPE_NAME
                                 dt.name,
-                                // PRECISION INT
-                                "" + MathUtils.convertLongToInt(dt.defaultPrecision),
+                                // PRECISION
+                                ValueInt.get(MathUtils.convertLongToInt(dt.defaultPrecision)),
                                 // SCALE
-                                "" + dt.defaultScale,
+                                ValueShort.get(MathUtils.convertIntToShort(dt.defaultScale)),
                                 // RADIX
-                                "10",
-                                // NULLABLE SMALLINT
-                                "" + nullable,
+                                ValueShort.get((short) 10),
+                                // NULLABLE
+                                ValueShort.get(clazz.isPrimitive()
+                                        ? (short) DatabaseMetaData.columnNoNulls
+                                        : (short) DatabaseMetaData.columnNullable),
                                 // COLUMN_TYPE
-                                "" + DatabaseMetaData.procedureColumnIn,
+                                ValueShort.get((short) DatabaseMetaData.procedureColumnIn),
                                 // REMARKS
-                                "",
-                                // COLUMN_DEFAULT
+                                "", // COLUMN_DEFAULT
                                 null
                         );
                     }
@@ -1413,11 +1579,12 @@ public class MetaTable extends Table {
         case SCHEMATA: {
             String collation = database.getCompareMode().getName();
             for (Schema schema : database.getAllSchemas()) {
-                add(rows,
+                add(session,
+                        rows,
                         // CATALOG_NAME
                         catalog,
                         // SCHEMA_NAME
-                        identifier(schema.getName()),
+                        schema.getName(),
                         // SCHEMA_OWNER
                         identifier(schema.getOwner().getName()),
                         // DEFAULT_CHARACTER_SET_NAME
@@ -1425,12 +1592,10 @@ public class MetaTable extends Table {
                         // DEFAULT_COLLATION_NAME
                         collation,
                         // IS_DEFAULT
-                        Constants.SCHEMA_MAIN.equals(
-                                schema.getName()) ? "TRUE" : "FALSE",
+                        ValueBoolean.get(schema.getId() == Constants.MAIN_SCHEMA_ID),
                         // REMARKS
-                        replaceNullWithEmpty(schema.getComment()),
-                        // ID
-                        "" + schema.getId()
+                        replaceNullWithEmpty(schema.getComment()), // ID
+                        ValueInt.get(schema.getId())
                 );
             }
             break;
@@ -1445,12 +1610,11 @@ public class MetaTable extends Table {
                 if (hideTable(table, session)) {
                     continue;
                 }
-                String tableName = identifier(table.getName());
+                String tableName = table.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
-                addPrivileges(rows, r.getGrantee(), catalog, table, null,
-                        r.getRightMask());
+                addPrivileges(session, rows, r.getGrantee(), catalog, table, null, r.getRightMask());
             }
             break;
         }
@@ -1464,25 +1628,24 @@ public class MetaTable extends Table {
                 if (hideTable(table, session)) {
                     continue;
                 }
-                String tableName = identifier(table.getName());
+                String tableName = table.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
                 DbObject grantee = r.getGrantee();
                 int mask = r.getRightMask();
                 for (Column column : table.getColumns()) {
-                    addPrivileges(rows, grantee, catalog, table,
-                            column.getName(), mask);
+                    addPrivileges(session, rows, grantee, catalog, table, column.getName(), mask);
                 }
             }
             break;
         }
         case COLLATIONS: {
             for (Locale l : Collator.getAvailableLocales()) {
-                add(rows,
+                add(session,
+                        rows,
                         // NAME
-                        CompareMode.getName(l),
-                        // KEY
+                        CompareMode.getName(l), // KEY
                         l.toString()
                 );
             }
@@ -1493,16 +1656,17 @@ public class MetaTable extends Table {
                 if (table.getTableType() != TableType.VIEW) {
                     continue;
                 }
-                String tableName = identifier(table.getName());
+                String tableName = table.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
                 TableView view = (TableView) table;
-                add(rows,
+                add(session,
+                        rows,
                         // TABLE_CATALOG
                         catalog,
                         // TABLE_SCHEMA
-                        identifier(table.getSchema().getName()),
+                        table.getSchema().getName(),
                         // TABLE_NAME
                         tableName,
                         // VIEW_DEFINITION
@@ -1514,9 +1678,8 @@ public class MetaTable extends Table {
                         // STATUS
                         view.isInvalid() ? "INVALID" : "VALID",
                         // REMARKS
-                        replaceNullWithEmpty(view.getComment()),
-                        // ID
-                        "" + view.getId()
+                        replaceNullWithEmpty(view.getComment()), // ID
+                        ValueInt.get(view.getId())
                 );
             }
             break;
@@ -1525,11 +1688,11 @@ public class MetaTable extends Table {
             ArrayList<InDoubtTransaction> prepared = database.getInDoubtTransactions();
             if (prepared != null && admin) {
                 for (InDoubtTransaction prep : prepared) {
-                    add(rows,
+                    add(session,
+                            rows,
                             // TRANSACTION
-                            prep.getTransactionName(),
-                            // STATE
-                            prep.getState()
+                            prep.getTransactionName(), // STATE
+                            prep.getStateDescription()
                     );
                 }
             }
@@ -1539,7 +1702,7 @@ public class MetaTable extends Table {
             for (SchemaObject obj : database.getAllSchemaObjects(
                     DbObject.CONSTRAINT)) {
                 Constraint constraint = (Constraint) obj;
-                if (!(constraint.getConstraintType().equals(Constraint.REFERENTIAL))) {
+                if (constraint.getConstraintType() != Constraint.Type.REFERENTIAL) {
                     continue;
                 }
                 ConstraintReferential ref = (ConstraintReferential) constraint;
@@ -1547,112 +1710,44 @@ public class MetaTable extends Table {
                 IndexColumn[] refCols = ref.getRefColumns();
                 Table tab = ref.getTable();
                 Table refTab = ref.getRefTable();
-                String tableName = identifier(refTab.getName());
+                String tableName = refTab.getName();
                 if (!checkIndex(session, tableName, indexFrom, indexTo)) {
                     continue;
                 }
-                int update = getRefAction(ref.getUpdateAction());
-                int delete = getRefAction(ref.getDeleteAction());
+                ValueShort update = ValueShort.get(getRefAction(ref.getUpdateAction()));
+                ValueShort delete = ValueShort.get(getRefAction(ref.getDeleteAction()));
                 for (int j = 0; j < cols.length; j++) {
-                    add(rows,
+                    add(session,
+                            rows,
                             // PKTABLE_CATALOG
                             catalog,
                             // PKTABLE_SCHEMA
-                            identifier(refTab.getSchema().getName()),
+                            refTab.getSchema().getName(),
                             // PKTABLE_NAME
-                            identifier(refTab.getName()),
+                            refTab.getName(),
                             // PKCOLUMN_NAME
-                            identifier(refCols[j].column.getName()),
+                            refCols[j].column.getName(),
                             // FKTABLE_CATALOG
                             catalog,
                             // FKTABLE_SCHEMA
-                            identifier(tab.getSchema().getName()),
+                            tab.getSchema().getName(),
                             // FKTABLE_NAME
-                            identifier(tab.getName()),
+                            tab.getName(),
                             // FKCOLUMN_NAME
-                            identifier(cols[j].column.getName()),
+                            cols[j].column.getName(),
                             // ORDINAL_POSITION
-                            String.valueOf(j + 1),
-                            // UPDATE_RULE SMALLINT
-                            String.valueOf(update),
-                            // DELETE_RULE SMALLINT
-                            String.valueOf(delete),
+                            ValueShort.get((short) (j + 1)),
+                            // UPDATE_RULE
+                            update,
+                            // DELETE_RULE
+                            delete,
                             // FK_NAME
-                            identifier(ref.getName()),
+                            ref.getName(),
                             // PK_NAME
-                            identifier(ref.getUniqueIndex().getName()),
-                            // DEFERRABILITY
-                            "" + DatabaseMetaData.importedKeyNotDeferrable
+                            ref.getReferencedConstraint().getName(), // DEFERRABILITY
+                            ValueShort.get((short) DatabaseMetaData.importedKeyNotDeferrable)
                     );
                 }
-            }
-            break;
-        }
-        case CONSTRAINTS: {
-            for (SchemaObject obj : database.getAllSchemaObjects(
-                    DbObject.CONSTRAINT)) {
-                Constraint constraint = (Constraint) obj;
-                String constraintType = constraint.getConstraintType();
-                String checkExpression = null;
-                IndexColumn[] indexColumns = null;
-                Table table = constraint.getTable();
-                if (hideTable(table, session)) {
-                    continue;
-                }
-                Index index = constraint.getUniqueIndex();
-                String uniqueIndexName = null;
-                if (index != null) {
-                    uniqueIndexName = index.getName();
-                }
-                String tableName = identifier(table.getName());
-                if (!checkIndex(session, tableName, indexFrom, indexTo)) {
-                    continue;
-                }
-                if (constraintType.equals(Constraint.CHECK)) {
-                    checkExpression = ((ConstraintCheck) constraint).getExpression().getSQL();
-                } else if (constraintType.equals(Constraint.UNIQUE) ||
-                        constraintType.equals(Constraint.PRIMARY_KEY)) {
-                    indexColumns = ((ConstraintUnique) constraint).getColumns();
-                } else if (constraintType.equals(Constraint.REFERENTIAL)) {
-                    indexColumns = ((ConstraintReferential) constraint).getColumns();
-                }
-                String columnList = null;
-                if (indexColumns != null) {
-                    StatementBuilder buff = new StatementBuilder();
-                    for (IndexColumn col : indexColumns) {
-                        buff.appendExceptFirst(",");
-                        buff.append(col.column.getName());
-                    }
-                    columnList = buff.toString();
-                }
-                add(rows,
-                        // CONSTRAINT_CATALOG
-                        catalog,
-                        // CONSTRAINT_SCHEMA
-                        identifier(constraint.getSchema().getName()),
-                        // CONSTRAINT_NAME
-                        identifier(constraint.getName()),
-                        // CONSTRAINT_TYPE
-                        constraintType,
-                        // TABLE_CATALOG
-                        catalog,
-                        // TABLE_SCHEMA
-                        identifier(table.getSchema().getName()),
-                        // TABLE_NAME
-                        tableName,
-                        // UNIQUE_INDEX_NAME
-                        uniqueIndexName,
-                        // CHECK_EXPRESSION
-                        checkExpression,
-                        // COLUMN_LIST
-                        columnList,
-                        // REMARKS
-                        replaceNullWithEmpty(constraint.getComment()),
-                        // SQL
-                        constraint.getCreateSQL(),
-                        // ID
-                        "" + constraint.getId()
-                    );
             }
             break;
         }
@@ -1661,57 +1756,63 @@ public class MetaTable extends Table {
                     DbObject.CONSTANT)) {
                 Constant constant = (Constant) obj;
                 ValueExpression expr = constant.getValue();
-                add(rows,
+                add(session,
+                        rows,
                         // CONSTANT_CATALOG
                         catalog,
                         // CONSTANT_SCHEMA
-                        identifier(constant.getSchema().getName()),
+                        constant.getSchema().getName(),
                         // CONSTANT_NAME
-                        identifier(constant.getName()),
-                        // CONSTANT_TYPE
-                        "" + DataType.convertTypeToSQLType(expr.getType()),
+                        constant.getName(),
+                        // DATA_TYPE
+                        ValueInt.get(DataType.convertTypeToSQLType(expr.getType().getValueType())),
                         // REMARKS
                         replaceNullWithEmpty(constant.getComment()),
                         // SQL
-                        expr.getSQL(),
-                        // ID
-                        "" + constant.getId()
+                        expr.getSQL(true), // ID
+                        ValueInt.get(constant.getId())
                     );
             }
             break;
         }
         case DOMAINS: {
-            for (UserDataType dt : database.getAllUserDataTypes()) {
-                Column col = dt.getColumn();
-                add(rows,
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.DOMAIN)) {
+                Domain domain = (Domain) obj;
+                Column col = domain.getColumn();
+                Domain parentDomain = col.getDomain();
+                add(session,
+                        rows,
                         // DOMAIN_CATALOG
                         catalog,
                         // DOMAIN_SCHEMA
-                        Constants.SCHEMA_MAIN,
+                        domain.getSchema().getName(),
                         // DOMAIN_NAME
-                        identifier(dt.getName()),
-                        // COLUMN_DEFAULT
+                        domain.getName(),
+                        // DOMAIN_DEFAULT
                         col.getDefaultSQL(),
-                        // IS_NULLABLE
-                        col.isNullable() ? "YES" : "NO",
+                        // DOMAIN_ON_UPDATE
+                        col.getOnUpdateSQL(),
                         // DATA_TYPE
-                        "" + col.getDataType().sqlType,
-                        // PRECISION INT
-                        "" + col.getPrecisionAsInt(),
-                        // SCALE INT
-                        "" + col.getScale(),
+                        ValueInt.get(col.getDataType().sqlType),
+                        // PRECISION
+                        ValueInt.get(col.getPrecisionAsInt()),
+                        // SCALE
+                        ValueInt.get(col.getType().getScale()),
                         // TYPE_NAME
                         col.getDataType().name,
+                        // PARENT_DOMAIN_CATALOG
+                        parentDomain != null ? catalog : null,
+                        // PARENT_DOMAIN_SCHEMA
+                        parentDomain != null ? parentDomain.getSchema().getName() : null,
+                        // PARENT_DOMAIN_NAME
+                        parentDomain != null ? parentDomain.getName() : null,
                         // SELECTIVITY INT
-                        "" + col.getSelectivity(),
-                        // CHECK_CONSTRAINT
-                        "" + col.getCheckConstraintSQL(session, "VALUE"),
+                        ValueInt.get(col.getSelectivity()),
                         // REMARKS
-                        replaceNullWithEmpty(dt.getComment()),
+                        replaceNullWithEmpty(domain.getComment()),
                         // SQL
-                        "" + dt.getCreateSQL(),
-                        // ID
-                        "" + dt.getId()
+                        domain.getCreateSQL(), // ID
+                        ValueInt.get(domain.getId())
                 );
             }
             break;
@@ -1721,61 +1822,70 @@ public class MetaTable extends Table {
                     DbObject.TRIGGER)) {
                 TriggerObject trigger = (TriggerObject) obj;
                 Table table = trigger.getTable();
-                add(rows,
+                add(session,
+                        rows,
                         // TRIGGER_CATALOG
                         catalog,
                         // TRIGGER_SCHEMA
-                        identifier(trigger.getSchema().getName()),
+                        trigger.getSchema().getName(),
                         // TRIGGER_NAME
-                        identifier(trigger.getName()),
+                        trigger.getName(),
                         // TRIGGER_TYPE
-                        trigger.getTypeNameList(),
+                        trigger.getTypeNameList(new StringBuilder()).toString(),
                         // TABLE_CATALOG
                         catalog,
                         // TABLE_SCHEMA
-                        identifier(table.getSchema().getName()),
+                        table.getSchema().getName(),
                         // TABLE_NAME
-                        identifier(table.getName()),
-                        // BEFORE BIT
-                        "" + trigger.isBefore(),
+                        table.getName(),
+                        // BEFORE
+                        ValueBoolean.get(trigger.isBefore()),
                         // JAVA_CLASS
                         trigger.getTriggerClassName(),
-                        // QUEUE_SIZE INT
-                        "" + trigger.getQueueSize(),
-                        // NO_WAIT BIT
-                        "" + trigger.isNoWait(),
+                        // QUEUE_SIZE
+                        ValueInt.get(trigger.getQueueSize()),
+                        // NO_WAIT
+                        ValueBoolean.get(trigger.isNoWait()),
                         // REMARKS
                         replaceNullWithEmpty(trigger.getComment()),
                         // SQL
-                        trigger.getCreateSQL(),
-                        // ID
-                        "" + trigger.getId()
+                        trigger.getCreateSQL(), // ID
+                        ValueInt.get(trigger.getId())
                 );
             }
             break;
         }
         case SESSIONS: {
-            long now = System.currentTimeMillis();
             for (Session s : database.getSessions(false)) {
                 if (admin || s == session) {
+                    NetworkConnectionInfo networkConnectionInfo = s.getNetworkConnectionInfo();
                     Command command = s.getCurrentCommand();
-                    long start = s.getCurrentCommandStart();
-                    if (start == 0) {
-                        start = now;
-                    }
-                    add(rows,
+                    int blockingSessionId = s.getBlockingSessionId();
+                    add(session,
+                            rows,
                             // ID
-                            "" + s.getId(),
+                            ValueInt.get(s.getId()),
                             // USER_NAME
                             s.getUser().getName(),
+                            // SERVER
+                            networkConnectionInfo == null ? null : networkConnectionInfo.getServer(),
+                            // CLIENT_ADDR
+                            networkConnectionInfo == null ? null : networkConnectionInfo.getClient(),
+                            // CLIENT_INFO
+                            networkConnectionInfo == null ? null : networkConnectionInfo.getClientInfo(),
                             // SESSION_START
-                            new Timestamp(s.getSessionStart()).toString(),
+                            s.getSessionStart(),
+                            // ISOLATION_LEVEL
+                            session.getIsolationLevel().getSQL(),
                             // STATEMENT
                             command == null ? null : command.toString(),
                             // STATEMENT_START
-                            new Timestamp(start).toString(),
+                            command == null ? null : s.getCurrentCommandStart(),
                             // CONTAINS_UNCOMMITTED
-                            "" + s.containsUncommitted()
+                            ValueBoolean.get(s.containsUncommitted()),
+                            // STATE
+                            String.valueOf(s.getState()), // BLOCKER_ID
+                            blockingSessionId == 0 ? null : ValueInt.get(blockingSessionId)
                     );
                 }
             }
@@ -1785,14 +1895,14 @@ public class MetaTable extends Table {
             for (Session s : database.getSessions(false)) {
                 if (admin || s == session) {
                     for (Table table : s.getLocks()) {
-                        add(rows,
+                        add(session,
+                                rows,
                                 // TABLE_SCHEMA
                                 table.getSchema().getName(),
                                 // TABLE_NAME
                                 table.getName(),
                                 // SESSION_ID
-                                "" + s.getId(),
-                                // LOCK_TYPE
+                                ValueInt.get(s.getId()), // LOCK_TYPE
                                 table.isLockedExclusivelyBy(s) ? "WRITE" : "READ"
                         );
                     }
@@ -1803,43 +1913,55 @@ public class MetaTable extends Table {
         case SESSION_STATE: {
             for (String name : session.getVariableNames()) {
                 Value v = session.getVariable(name);
-                add(rows,
+                StringBuilder builder = new StringBuilder().append("SET @").append(name).append(' ');
+                v.getSQL(builder);
+                add(session,
+                        rows,
                         // KEY
-                        "@" + name,
-                        // SQL
-                        "SET @" + name + " " + v.getSQL()
+                        "@" + name, builder.toString()
                 );
             }
             for (Table table : session.getLocalTempTables()) {
-                add(rows,
+                add(session,
+                        rows,
                         // KEY
-                        "TABLE " + table.getName(),
-                        // SQL
+                        "TABLE " + table.getName(), // SQL
                         table.getCreateSQL()
                 );
             }
             String[] path = session.getSchemaSearchPath();
             if (path != null && path.length > 0) {
-                StatementBuilder buff = new StatementBuilder(
-                        "SET SCHEMA_SEARCH_PATH ");
-                for (String p : path) {
-                    buff.appendExceptFirst(", ");
-                    buff.append(StringUtils.quoteIdentifier(p));
+                StringBuilder builder = new StringBuilder("SET SCHEMA_SEARCH_PATH ");
+                for (int i = 0, l = path.length; i < l; i++) {
+                    if (i > 0) {
+                        builder.append(", ");
+                    }
+                    StringUtils.quoteIdentifier(builder, path[i]);
                 }
-                add(rows,
+                add(session,
+                        rows,
                         // KEY
-                        "SCHEMA_SEARCH_PATH",
-                        // SQL
-                        buff.toString()
+                        "SCHEMA_SEARCH_PATH", // SQL
+                        builder.toString()
                 );
             }
             String schema = session.getCurrentSchemaName();
             if (schema != null) {
-                add(rows,
+                add(session,
+                        rows,
                         // KEY
-                        "SCHEMA",
-                        // SQL
-                        "SET SCHEMA " + StringUtils.quoteIdentifier(schema)
+                        "SCHEMA", // SQL
+                        StringUtils.quoteIdentifier(new StringBuilder("SET SCHEMA "), schema).toString()
+                );
+            }
+            TimeZoneProvider currentTimeZone = session.currentTimeZone();
+            if (!currentTimeZone.equals(DateTimeUtils.getTimeZone())) {
+                add(session,
+                        rows,
+                        // KEY
+                        "TIME ZONE", // SQL
+                        StringUtils.quoteStringSQL(new StringBuilder("SET TIME ZONE "), currentTimeZone.getId())
+                                .toString()
                 );
             }
             break;
@@ -1848,78 +1970,349 @@ public class MetaTable extends Table {
             QueryStatisticsData control = database.getQueryStatisticsData();
             if (control != null) {
                 for (QueryStatisticsData.QueryEntry entry : control.getQueries()) {
-                    add(rows,
+                    add(session,
+                            rows,
                             // SQL_STATEMENT
                             entry.sqlStatement,
                             // EXECUTION_COUNT
-                            "" + entry.count,
+                            ValueInt.get(entry.count),
                             // MIN_EXECUTION_TIME
-                            "" + entry.executionTimeMinNanos / 1000d / 1000,
+                            ValueDouble.get(entry.executionTimeMinNanos / 1_000_000d),
                             // MAX_EXECUTION_TIME
-                            "" + entry.executionTimeMaxNanos / 1000d / 1000,
+                            ValueDouble.get(entry.executionTimeMaxNanos / 1_000_000d),
                             // CUMULATIVE_EXECUTION_TIME
-                            "" + entry.executionTimeCumulativeNanos / 1000d / 1000,
+                            ValueDouble.get(entry.executionTimeCumulativeNanos / 1_000_000d),
                             // AVERAGE_EXECUTION_TIME
-                            "" + entry.executionTimeMeanNanos / 1000d / 1000,
+                            ValueDouble.get(entry.executionTimeMeanNanos / 1_000_000d),
                             // STD_DEV_EXECUTION_TIME
-                            "" + entry.getExecutionTimeStandardDeviation() / 1000d / 1000,
+                            ValueDouble.get(entry.getExecutionTimeStandardDeviation() / 1_000_000d),
                             // MIN_ROW_COUNT
-                            "" + entry.rowCountMin,
+                            ValueInt.get(entry.rowCountMin),
                             // MAX_ROW_COUNT
-                            "" + entry.rowCountMax,
+                            ValueInt.get(entry.rowCountMax),
                             // CUMULATIVE_ROW_COUNT
-                            "" + entry.rowCountCumulative,
+                            ValueLong.get(entry.rowCountCumulative),
                             // AVERAGE_ROW_COUNT
-                            "" + entry.rowCountMean,
-                            // STD_DEV_ROW_COUNT
-                            "" + entry.getRowCountStandardDeviation()
+                            ValueDouble.get(entry.rowCountMean), // STD_DEV_ROW_COUNT
+                            ValueDouble.get(entry.getRowCountStandardDeviation())
                     );
                 }
             }
             break;
         }
         case SYNONYMS: {
-                for (TableSynonym synonym : database.getAllSynonyms()) {
-                    add(rows,
-                            // SYNONYM_CATALOG
+            for (TableSynonym synonym : database.getAllSynonyms()) {
+                add(session,
+                        rows,
+                        // SYNONYM_CATALOG
+                        catalog,
+                        // SYNONYM_SCHEMA
+                        synonym.getSchema().getName(),
+                        // SYNONYM_NAME
+                        synonym.getName(),
+                        // SYNONYM_FOR
+                        synonym.getSynonymForName(),
+                        // SYNONYM_FOR_SCHEMA
+                        synonym.getSynonymForSchema().getName(),
+                        // TYPE NAME
+                        "SYNONYM",
+                        // STATUS
+                        "VALID",
+                        // REMARKS
+                        replaceNullWithEmpty(synonym.getComment()), // ID
+                        ValueInt.get(synonym.getId())
+                );
+            }
+            break;
+        }
+        case TABLE_CONSTRAINTS: {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.CONSTRAINT)) {
+                Constraint constraint = (Constraint) obj;
+                Constraint.Type constraintType = constraint.getConstraintType();
+                if (constraintType == Constraint.Type.DOMAIN) {
+                    continue;
+                }
+                Table table = constraint.getTable();
+                if (hideTable(table, session)) {
+                    continue;
+                }
+                String tableName = table.getName();
+                if (!checkIndex(session, tableName, indexFrom, indexTo)) {
+                    continue;
+                }
+                add(session,
+                        rows,
+                        // CONSTRAINT_CATALOG
+                        catalog,
+                        // CONSTRAINT_SCHEMA
+                        constraint.getSchema().getName(),
+                        // CONSTRAINT_NAME
+                        constraint.getName(),
+                        // CONSTRAINT_TYPE
+                        constraintType.getSqlName(),
+                        // TABLE_CATALOG
+                        catalog,
+                        // TABLE_SCHEMA
+                        table.getSchema().getName(),
+                        // TABLE_NAME
+                        tableName,
+                        // IS_DEFERRABLE
+                        "NO",
+                        // INITIALLY_DEFERRED
+                        "NO",
+                        // REMARKS
+                        replaceNullWithEmpty(constraint.getComment()),
+                        // SQL
+                        constraint.getCreateSQL(), // ID
+                        ValueInt.get(constraint.getId())
+                );
+            }
+            break;
+        }
+        case DOMAIN_CONSTRAINTS: {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.CONSTRAINT)) {
+                if (((Constraint) obj).getConstraintType() != Constraint.Type.DOMAIN) {
+                    continue;
+                }
+                ConstraintDomain constraint = (ConstraintDomain) obj;
+                Domain domain = constraint.getDomain();
+                add(session,
+                        rows,
+                        // CONSTRAINT_CATALOG
+                        catalog,
+                        // CONSTRAINT_SCHEMA
+                        constraint.getSchema().getName(),
+                        // CONSTRAINT_NAME
+                        constraint.getName(),
+                        // DOMAIN_CATALOG
+                        catalog,
+                        // DOMAIN_SCHEMA
+                        domain.getSchema().getName(),
+                        // DOMAIN_NAME
+                        domain.getName(),
+                        // IS_DEFERRABLE
+                        "NO",
+                        // INITIALLY_DEFERRED
+                        "NO",
+                        // REMARKS
+                        replaceNullWithEmpty(constraint.getComment()),
+                        // SQL
+                        constraint.getCreateSQL(), // ID
+                        ValueInt.get(constraint.getId())
+                );
+            }
+            break;
+        }
+        case KEY_COLUMN_USAGE: {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.CONSTRAINT)) {
+                Constraint constraint = (Constraint) obj;
+                Constraint.Type constraintType = constraint.getConstraintType();
+                IndexColumn[] indexColumns = null;
+                if (constraintType == Constraint.Type.UNIQUE || constraintType == Constraint.Type.PRIMARY_KEY) {
+                    indexColumns = ((ConstraintUnique) constraint).getColumns();
+                } else if (constraintType == Constraint.Type.REFERENTIAL) {
+                    indexColumns = ((ConstraintReferential) constraint).getColumns();
+                }
+                if (indexColumns == null) {
+                    continue;
+                }
+                Table table = constraint.getTable();
+                if (hideTable(table, session)) {
+                    continue;
+                }
+                String tableName = table.getName();
+                if (!checkIndex(session, tableName, indexFrom, indexTo)) {
+                    continue;
+                }
+                ConstraintUnique referenced;
+                if (constraintType == Constraint.Type.REFERENTIAL) {
+                    referenced = ((ConstraintReferential) constraint).getReferencedConstraint();
+                } else {
+                    referenced = null;
+                }
+                Index index = constraint.getIndex();
+                for (int i = 0; i < indexColumns.length; i++) {
+                    IndexColumn indexColumn = indexColumns[i];
+                    ValueInt ordinalPosition = ValueInt.get(i + 1);
+                    ValueInt positionInUniqueConstraint = null;
+                    if (referenced != null) {
+                        Column c = ((ConstraintReferential) constraint).getRefColumns()[i].column;
+                        IndexColumn[] refColumns = referenced.getColumns();
+                        for (int j = 0; j < refColumns.length; j++) {
+                            if (refColumns[j].column.equals(c)) {
+                                positionInUniqueConstraint = ValueInt.get(j + 1);
+                                break;
+                            }
+                        }
+                    }
+                    add(session,
+                            rows,
+                            // CONSTRAINT_CATALOG
                             catalog,
-                            // SYNONYM_SCHEMA
-                            identifier(synonym.getSchema().getName()),
-                            // SYNONYM_NAME
-                            identifier(synonym.getName()),
-                            // SYNONYM_FOR
-                            synonym.getSynonymForName(),
-                            // TYPE NAME
-                            "SYNONYM",
-                            // STATUS
-                            "VALID",
-                            // REMARKS
-                            replaceNullWithEmpty(synonym.getComment()),
-                            // ID
-                            "" + synonym.getId()
+                            // CONSTRAINT_SCHEMA
+                            constraint.getSchema().getName(),
+                            // CONSTRAINT_NAME
+                            constraint.getName(),
+                            // TABLE_CATALOG
+                            catalog,
+                            // TABLE_SCHEMA
+                            table.getSchema().getName(),
+                            // TABLE_NAME
+                            tableName,
+                            // COLUMN_NAME
+                            indexColumn.columnName,
+                            // ORDINAL_POSITION
+                            ordinalPosition,
+                            // POSITION_IN_UNIQUE_CONSTRAINT
+                            positionInUniqueConstraint,
+                            // INDEX_CATALOG
+                            index != null ? catalog : null,
+                            // INDEX_SCHEMA
+                            index != null ? index.getSchema().getName() : null, // INDEX_NAME
+                            index != null ? index.getName() : null
                     );
                 }
-                break;
             }
+            break;
+        }
+        case REFERENTIAL_CONSTRAINTS: {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.CONSTRAINT)) {
+                if (((Constraint) obj).getConstraintType() != Constraint.Type.REFERENTIAL) {
+                    continue;
+                }
+                ConstraintReferential constraint = (ConstraintReferential) obj;
+                Table table = constraint.getTable();
+                if (hideTable(table, session)) {
+                    continue;
+                }
+                ConstraintUnique unique = constraint.getReferencedConstraint();
+                add(session,
+                        rows,
+                        // CONSTRAINT_CATALOG
+                        catalog,
+                        // CONSTRAINT_SCHEMA
+                        constraint.getSchema().getName(),
+                        // CONSTRAINT_NAME
+                        constraint.getName(),
+                        // UNIQUE_CONSTRAINT_CATALOG
+                        catalog,
+                        // UNIQUE_CONSTRAINT_SCHEMA
+                        unique.getSchema().getName(),
+                        // UNIQUE_CONSTRAINT_NAME
+                        unique.getName(),
+                        // MATCH_OPTION
+                        "NONE",
+                        // UPDATE_RULE
+                        constraint.getUpdateAction().getSqlName(), // DELETE_RULE
+                        constraint.getDeleteAction().getSqlName()
+                );
+            }
+            break;
+        }
+        case CHECK_CONSTRAINTS: {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.CONSTRAINT)) {
+                Constraint constraint = (Constraint) obj;
+                Type constraintType = constraint.getConstraintType();
+                if (constraintType == Constraint.Type.CHECK) {
+                    ConstraintCheck check = (ConstraintCheck) obj;
+                    Table table = check.getTable();
+                    if (hideTable(table, session)) {
+                        continue;
+                    }
+                } else if (constraintType != Constraint.Type.DOMAIN) {
+                    continue;
+                }
+                add(session,
+                        rows,
+                        // CONSTRAINT_CATALOG
+                        catalog,
+                        // CONSTRAINT_SCHEMA
+                        obj.getSchema().getName(),
+                        // CONSTRAINT_NAME
+                        obj.getName(), // CHECK_CLAUSE
+                        constraint.getExpression().getUnenclosedSQL(new StringBuilder(), true).toString()
+                );
+            }
+            break;
+        }
+        case CONSTRAINT_COLUMN_USAGE: {
+            for (SchemaObject obj : database.getAllSchemaObjects(DbObject.CONSTRAINT)) {
+                Constraint constraint = (Constraint) obj;
+                switch (constraint.getConstraintType()) {
+                case CHECK:
+                case DOMAIN: {
+                    HashSet<Column> columns = new HashSet<>();
+                    constraint.getExpression().isEverything(ExpressionVisitor.getColumnsVisitor(columns, null));
+                    for (Column column: columns) {
+                        Table table = column.getTable();
+                        if (checkIndex(session, table.getName(), indexFrom, indexTo) && !hideTable(table, session)) {
+                            addConstraintColumnUsage(session, rows, catalog, constraint, column);
+                        }
+                    }
+                    break;
+                }
+                case REFERENTIAL: {
+                    Table table = constraint.getRefTable();
+                    if (checkIndex(session, table.getName(), indexFrom, indexTo) && !hideTable(table, session)) {
+                        for (Column column : constraint.getReferencedColumns(table)) {
+                            addConstraintColumnUsage(session, rows, catalog, constraint, column);
+                        }
+                    }
+                }
+                //$FALL-THROUGH$
+                case PRIMARY_KEY:
+                case UNIQUE: {
+                    Table table = constraint.getTable();
+                    if (checkIndex(session, table.getName(), indexFrom, indexTo) && !hideTable(table, session)) {
+                        for (Column column : constraint.getReferencedColumns(table)) {
+                            addConstraintColumnUsage(session, rows, catalog, constraint, column);
+                        }
+                    }
+                }
+                }
+            }
+            break;
+        }
         default:
             DbException.throwInternalError("type="+type);
         }
         return rows;
     }
 
-    private static int getRefAction(int action) {
+    private static short getRefAction(ConstraintActionType action) {
         switch (action) {
-        case ConstraintReferential.CASCADE:
+        case CASCADE:
             return DatabaseMetaData.importedKeyCascade;
-        case ConstraintReferential.RESTRICT:
+        case RESTRICT:
             return DatabaseMetaData.importedKeyRestrict;
-        case ConstraintReferential.SET_DEFAULT:
+        case SET_DEFAULT:
             return DatabaseMetaData.importedKeySetDefault;
-        case ConstraintReferential.SET_NULL:
+        case SET_NULL:
             return DatabaseMetaData.importedKeySetNull;
         default:
             throw DbException.throwInternalError("action="+action);
         }
+    }
+
+    private void addConstraintColumnUsage(Session session, ArrayList<Row> rows, String catalog, Constraint constraint,
+            Column column) {
+        Table table = column.getTable();
+        add(session,
+                rows,
+                // TABLE_CATALOG
+                catalog,
+                // TABLE_SCHEMA
+                table.getSchema().getName(),
+                // TABLE_NAME
+                table.getName(),
+                // COLUMN_NAME
+                column.getName(),
+                // CONSTRAINT_CATALOG
+                catalog,
+                // CONSTRAINT_SCHEMA
+                constraint.getSchema().getName(), // CONSTRAINT_NAME
+                constraint.getName()
+        );
     }
 
     @Override
@@ -1947,23 +2340,23 @@ public class MetaTable extends Table {
         // nothing to do
     }
 
-    private void addPrivileges(ArrayList<Row> rows, DbObject grantee,
+    private void addPrivileges(Session session, ArrayList<Row> rows, DbObject grantee,
             String catalog, Table table, String column, int rightMask) {
         if ((rightMask & Right.SELECT) != 0) {
-            addPrivilege(rows, grantee, catalog, table, column, "SELECT");
+            addPrivilege(session, rows, grantee, catalog, table, column, "SELECT");
         }
         if ((rightMask & Right.INSERT) != 0) {
-            addPrivilege(rows, grantee, catalog, table, column, "INSERT");
+            addPrivilege(session, rows, grantee, catalog, table, column, "INSERT");
         }
         if ((rightMask & Right.UPDATE) != 0) {
-            addPrivilege(rows, grantee, catalog, table, column, "UPDATE");
+            addPrivilege(session, rows, grantee, catalog, table, column, "UPDATE");
         }
         if ((rightMask & Right.DELETE) != 0) {
-            addPrivilege(rows, grantee, catalog, table, column, "DELETE");
+            addPrivilege(session, rows, grantee, catalog, table, column, "DELETE");
         }
     }
 
-    private void addPrivilege(ArrayList<Row> rows, DbObject grantee,
+    private void addPrivilege(Session session, ArrayList<Row> rows, DbObject grantee,
             String catalog, Table table, String column, String right) {
         String isGrantable = "NO";
         if (grantee.getType() == DbObject.USER) {
@@ -1974,7 +2367,8 @@ public class MetaTable extends Table {
             }
         }
         if (column == null) {
-            add(rows,
+            add(session,
+                    rows,
                     // GRANTOR
                     null,
                     // GRANTEE
@@ -1982,16 +2376,16 @@ public class MetaTable extends Table {
                     // TABLE_CATALOG
                     catalog,
                     // TABLE_SCHEMA
-                    identifier(table.getSchema().getName()),
+                    table.getSchema().getName(),
                     // TABLE_NAME
-                    identifier(table.getName()),
+                    table.getName(),
                     // PRIVILEGE_TYPE
-                    right,
-                    // IS_GRANTABLE
+                    right, // IS_GRANTABLE
                     isGrantable
             );
         } else {
-            add(rows,
+            add(session,
+                    rows,
                     // GRANTOR
                     null,
                     // GRANTEE
@@ -1999,31 +2393,26 @@ public class MetaTable extends Table {
                     // TABLE_CATALOG
                     catalog,
                     // TABLE_SCHEMA
-                    identifier(table.getSchema().getName()),
+                    table.getSchema().getName(),
                     // TABLE_NAME
-                    identifier(table.getName()),
+                    table.getName(),
                     // COLUMN_NAME
-                    identifier(column),
+                    column,
                     // PRIVILEGE_TYPE
-                    right,
-                    // IS_GRANTABLE
+                    right, // IS_GRANTABLE
                     isGrantable
             );
         }
     }
 
-    private void add(ArrayList<Row> rows, String... strings) {
-        Value[] values = new Value[strings.length];
-        for (int i = 0; i < strings.length; i++) {
-            String s = strings[i];
-            Value v = (s == null) ? (Value) ValueNull.INSTANCE : ValueString.get(s);
-            Column col = columns[i];
-            v = col.convert(v);
-            values[i] = v;
+    private void add(Session session, ArrayList<Row> rows, Object... stringsOrValues) {
+        Value[] values = new Value[stringsOrValues.length];
+        for (int i = 0; i < stringsOrValues.length; i++) {
+            Object s = stringsOrValues[i];
+            Value v = s == null ? ValueNull.INSTANCE : s instanceof String ? ValueString.get((String) s) : (Value) s;
+            values[i] = columns[i].convert(session, v);
         }
-        Row row = database.createRow(values, 1);
-        row.setKey(rows.size());
-        rows.add(row);
+        rows.add(Row.get(values, 1, rows.size()));
     }
 
     @Override
@@ -2068,7 +2457,7 @@ public class MetaTable extends Table {
 
     @Override
     public ArrayList<Index> getIndexes() {
-        ArrayList<Index> list = New.arrayList();
+        ArrayList<Index> list = new ArrayList<>(2);
         if (metaIndex == null) {
             return list;
         }
@@ -2082,6 +2471,7 @@ public class MetaTable extends Table {
     public long getMaxDataModificationId() {
         switch (type) {
         case SETTINGS:
+        case SEQUENCES:
         case IN_DOUBT:
         case SESSIONS:
         case LOCKS:

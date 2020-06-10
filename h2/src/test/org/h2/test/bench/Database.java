@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.bench;
@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import org.h2.test.TestBase;
 import org.h2.tools.Server;
 import org.h2.util.StringUtils;
+import org.h2.util.Utils;
 
 /**
  * Represents a database in the benchmark test application.
@@ -34,16 +35,18 @@ class Database {
     private DatabaseTest test;
     private int id;
     private String name, url, user, password;
-    private final ArrayList<String[]> replace = new ArrayList<String[]>();
+    private final ArrayList<String[]> replace = new ArrayList<>();
     private String currentAction;
     private long startTimeNs;
+    private long initialGCTime;
     private Connection conn;
     private Statement stat;
     private long lastTrace;
     private final Random random = new Random(1);
-    private final ArrayList<Object[]> results = new ArrayList<Object[]>();
+    private final ArrayList<Object[]> results = new ArrayList<>();
     private int totalTime;
-    private final AtomicInteger executedStatements = new AtomicInteger(0);
+    private int totalGCTime;
+    private final AtomicInteger executedStatements = new AtomicInteger();
     private int threadCount;
 
     private Server serverH2;
@@ -69,6 +72,15 @@ class Database {
     }
 
     /**
+     * Get the total measured GC time.
+     *
+     * @return the time in milliseconds
+     */
+    int getTotalGCTime() {
+        return totalGCTime;
+    }
+
+    /**
      * Get the result array.
      *
      * @return the result array
@@ -91,11 +103,11 @@ class Database {
      */
     void startServer() throws Exception {
         if (url.startsWith("jdbc:h2:tcp:")) {
-            serverH2 = Server.createTcpServer().start();
+            serverH2 = Server.createTcpServer("-ifNotExists").start();
             Thread.sleep(100);
         } else if (url.startsWith("jdbc:derby://")) {
             serverDerby = Class.forName(
-                    "org.apache.derby.drda.NetworkServerControl").newInstance();
+                    "org.apache.derby.drda.NetworkServerControl").getDeclaredConstructor().newInstance();
             Method m = serverDerby.getClass().getMethod("start", PrintWriter.class);
             m.invoke(serverDerby, new Object[] { null });
             // serverDerby = new NetworkServerControl();
@@ -235,7 +247,7 @@ class Database {
             String key = (String) k;
             if (key.startsWith(databaseType + ".")) {
                 String pattern = key.substring(databaseType.length() + 1);
-                pattern = StringUtils.replaceAll(pattern, "_", " ");
+                pattern = pattern.replace('_', ' ');
                 pattern = StringUtils.toUpperEnglish(pattern);
                 String replacement = prop.getProperty(key);
                 replace.add(new String[]{pattern, replacement});
@@ -272,6 +284,7 @@ class Database {
     void start(Bench bench, String action) {
         this.currentAction = bench.getName() + ": " + action;
         this.startTimeNs = System.nanoTime();
+        this.initialGCTime = Utils.getGarbageCollectionTime();
     }
 
     /**
@@ -280,9 +293,11 @@ class Database {
      */
     void end() {
         long time = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startTimeNs);
+        long gcCollectionTime = Utils.getGarbageCollectionTime() - initialGCTime;
         log(currentAction, "ms", (int) time);
         if (test.isCollect()) {
             totalTime += time;
+            totalGCTime += gcCollectionTime;
         }
     }
 
@@ -421,7 +436,7 @@ class Database {
      * @param prep the prepared statement
      */
     void queryReadResult(PreparedStatement prep) throws SQLException {
-        ResultSet rs = prep.executeQuery();
+        ResultSet rs = query(prep);
         ResultSetMetaData meta = rs.getMetaData();
         int columnCount = meta.getColumnCount();
         while (rs.next()) {

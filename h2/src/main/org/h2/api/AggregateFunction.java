@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.api;
@@ -25,7 +25,9 @@ public interface AggregateFunction {
      *
      * @param conn a connection to the database
      */
-    void init(Connection conn) throws SQLException;
+    default void init(Connection conn) throws SQLException {
+        // Do nothing by default
+    }
 
     /**
      * This method must return the SQL type of the method, given the SQL type of
@@ -47,7 +49,9 @@ public interface AggregateFunction {
     void add(Object value) throws SQLException;
 
     /**
-     * This method returns the computed aggregate value.
+     * This method returns the computed aggregate value. This method must
+     * preserve previously added values and must be able to reevaluate result if
+     * more values were added since its previous invocation.
      *
      * @return the aggregated value
      */

@@ -1,15 +1,15 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jcr;
 
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.FileOutputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.util.ArrayList;
@@ -22,7 +22,6 @@ import org.h2.build.doc.BnfSyntax;
 import org.h2.build.doc.RailroadImages;
 import org.h2.server.web.PageParser;
 import org.h2.tools.Csv;
-import org.h2.util.IOUtils;
 import org.h2.util.StringUtils;
 
 /**
@@ -31,7 +30,7 @@ import org.h2.util.StringUtils;
 public class Railroads {
 
     private Bnf bnf;
-    private final HashMap<String, Object> session = new HashMap<String, Object>();
+    private final HashMap<String, Object> session = new HashMap<>();
 
     /**
      * This method is called when executing this application from the command
@@ -56,21 +55,18 @@ public class Railroads {
     private void processHtml(String fileName) throws Exception {
         String source = "src/tools/org/h2/jcr/";
         String target = "docs/html/";
-        byte[] s = BuildBase.readFile(new File(source + "stylesheet.css"));
-        BuildBase.writeFile(new File(target + "stylesheet.css"), s);
-        String inFile = source + fileName;
-        String outFile = target + fileName;
-        new File(outFile).getParentFile().mkdirs();
-        FileOutputStream out = new FileOutputStream(outFile);
-        FileInputStream in = new FileInputStream(inFile);
-        byte[] bytes = IOUtils.readBytesAndClose(in, 0);
+        byte[] s = BuildBase.readFile(Paths.get(source + "stylesheet.css"));
+        BuildBase.writeFile(Paths.get(target + "stylesheet.css"), s);
+        Path inFile = Paths.get(source + fileName);
+        Path outFile = Paths.get(target + fileName);
+        Files.createDirectories(outFile.getParent());
+        byte[] bytes = Files.readAllBytes(inFile) ;
         if (fileName.endsWith(".html")) {
             String page = new String(bytes);
             page = PageParser.parse(page, session);
             bytes = page.getBytes();
         }
-        out.write(bytes);
-        out.close();
+        Files.write(outFile, bytes);
     }
 
     private static Reader getReader() {
@@ -79,9 +75,9 @@ public class Railroads {
 
     private void map(String key, ResultSet rs, boolean railroads) throws Exception {
         ArrayList<HashMap<String, String>> list;
-        list = new ArrayList<HashMap<String, String>>();
+        list = new ArrayList<>();
         while (rs.next()) {
-            HashMap<String, String> map = new HashMap<String, String>();
+            HashMap<String, String> map = new HashMap<>();
             ResultSetMetaData meta = rs.getMetaData();
             for (int i = 0; i < meta.getColumnCount(); i++) {
                 String k = StringUtils.toLowerEnglish(meta.getColumnLabel(i + 1));
@@ -109,9 +105,9 @@ public class Railroads {
             }
 
             String link = topic.toLowerCase();
-            link = StringUtils.replaceAll(link, " ", "_");
+            link = link.replace(' ', '_');
             // link = StringUtils.replaceAll(link, "_", "");
-            link = StringUtils.replaceAll(link, "@", "_");
+            link = link.replace('@', '_');
             map.put("link", StringUtils.urlEncode(link));
             list.add(map);
         }

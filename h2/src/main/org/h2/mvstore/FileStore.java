@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.mvstore;
@@ -10,12 +10,11 @@ import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.nio.channels.OverlappingFileLockException;
-
+import java.util.concurrent.atomic.AtomicLong;
 import org.h2.mvstore.cache.FilePathCache;
 import org.h2.store.fs.FilePath;
-import org.h2.store.fs.FilePathDisk;
-import org.h2.store.fs.FilePathEncrypt;
-import org.h2.store.fs.FilePathNio;
+import org.h2.store.fs.encrypt.FileEncrypt;
+import org.h2.store.fs.encrypt.FilePathEncrypt;
 
 /**
  * The default storage mechanism of the MVStore. This implementation persists
@@ -27,22 +26,22 @@ public class FileStore {
     /**
      * The number of read operations.
      */
-    protected long readCount;
+    protected final AtomicLong readCount = new AtomicLong();
 
     /**
      * The number of read bytes.
      */
-    protected long readBytes;
+    protected final AtomicLong readBytes = new AtomicLong();
 
     /**
      * The number of write operations.
      */
-    protected long writeCount;
+    protected final AtomicLong writeCount = new AtomicLong();
 
     /**
      * The number of written bytes.
      */
-    protected long writeBytes;
+    protected final AtomicLong writeBytes = new AtomicLong();
 
     /**
      * The free spaces between the chunks. The first block to use is block 2
@@ -54,12 +53,12 @@ public class FileStore {
     /**
      * The file name.
      */
-    protected String fileName;
+    private String fileName;
 
     /**
      * Whether this store is read-only.
      */
-    protected boolean readOnly;
+    private boolean readOnly;
 
     /**
      * The file size (cached).
@@ -69,17 +68,17 @@ public class FileStore {
     /**
      * The file.
      */
-    protected FileChannel file;
+    private FileChannel file;
 
     /**
      * The encrypted file (if encryption is used).
      */
-    protected FileChannel encryptedFile;
+    private FileChannel encryptedFile;
 
     /**
      * The file lock.
      */
-    protected FileLock fileLock;
+    private FileLock fileLock;
 
     @Override
     public String toString() {
@@ -96,8 +95,8 @@ public class FileStore {
     public ByteBuffer readFully(long pos, int len) {
         ByteBuffer dst = ByteBuffer.allocate(len);
         DataUtils.readFully(file, pos, dst);
-        readCount++;
-        readBytes += len;
+        readCount.incrementAndGet();
+        readBytes.addAndGet(len);
         return dst;
     }
 
@@ -111,8 +110,8 @@ public class FileStore {
         int len = src.remaining();
         fileSize = Math.max(fileSize, pos + len);
         DataUtils.writeFully(file, pos, src);
-        writeCount++;
-        writeBytes += len;
+        writeCount.incrementAndGet();
+        writeBytes.addAndGet(len);
     }
 
     /**
@@ -128,18 +127,8 @@ public class FileStore {
         if (file != null) {
             return;
         }
-        if (fileName != null) {
-            // ensure the Cache file system is registered
-            FilePathCache.INSTANCE.getScheme();
-            FilePath p = FilePath.get(fileName);
-            // if no explicit scheme was specified, NIO is used
-            if (p instanceof FilePathDisk &&
-                    !fileName.startsWith(p.getScheme() + ":")) {
-                // ensure the NIO file system is registered
-                FilePathNio.class.getName();
-                fileName = "nio:" + fileName;
-            }
-        }
+        // ensure the Cache file system is registered
+        FilePathCache.INSTANCE.getScheme();
         this.fileName = fileName;
         FilePath f = FilePath.get(fileName);
         FilePath parent = f.getParent();
@@ -156,7 +145,7 @@ public class FileStore {
             if (encryptionKey != null) {
                 byte[] key = FilePathEncrypt.getPasswordBytes(encryptionKey);
                 encryptedFile = file;
-                file = new FilePathEncrypt.FileEncrypt(fileName, key, file);
+                file = new FileEncrypt(fileName, key, file);
             }
             try {
                 if (readOnly) {
@@ -170,12 +159,14 @@ public class FileStore {
                         "The file is locked: {0}", fileName, e);
             }
             if (fileLock == null) {
+                try { close(); } catch (Exception ignore) {}
                 throw DataUtils.newIllegalStateException(
                         DataUtils.ERROR_FILE_LOCKED,
                         "The file is locked: {0}", fileName);
             }
             fileSize = file.size();
         } catch (IOException e) {
+            try { close(); } catch (Exception ignore) {}
             throw DataUtils.newIllegalStateException(
                     DataUtils.ERROR_READING_FAILED,
                     "Could not open file {0}", fileName, e);
@@ -187,17 +178,18 @@ public class FileStore {
      */
     public void close() {
         try {
-            if (fileLock != null) {
-                fileLock.release();
-                fileLock = null;
+            if(file != null && file.isOpen()) {
+                if (fileLock != null) {
+                    fileLock.release();
+                }
+                file.close();
             }
-            file.close();
-            freeSpace.clear();
         } catch (Exception e) {
             throw DataUtils.newIllegalStateException(
                     DataUtils.ERROR_WRITING_FAILED,
                     "Closing failed for file {0}", fileName, e);
         } finally {
+            fileLock = null;
             file = null;
         }
     }
@@ -206,12 +198,14 @@ public class FileStore {
      * Flush all changes.
      */
     public void sync() {
-        try {
-            file.force(true);
-        } catch (IOException e) {
-            throw DataUtils.newIllegalStateException(
-                    DataUtils.ERROR_WRITING_FAILED,
-                    "Could not sync file {0}", fileName, e);
+        if (file != null) {
+            try {
+                file.force(true);
+            } catch (IOException e) {
+                throw DataUtils.newIllegalStateException(
+                        DataUtils.ERROR_WRITING_FAILED,
+                        "Could not sync file {0}", fileName, e);
+            }
         }
     }
 
@@ -230,15 +224,23 @@ public class FileStore {
      * @param size the new file size
      */
     public void truncate(long size) {
-        try {
-            writeCount++;
-            file.truncate(size);
-            fileSize = Math.min(fileSize, size);
-        } catch (IOException e) {
-            throw DataUtils.newIllegalStateException(
-                    DataUtils.ERROR_WRITING_FAILED,
-                    "Could not truncate file {0} to size {1}",
-                    fileName, size, e);
+        int attemptCount = 0;
+        while (true) {
+            try {
+                writeCount.incrementAndGet();
+                file.truncate(size);
+                fileSize = Math.min(fileSize, size);
+                return;
+            } catch (IOException e) {
+                if (++attemptCount == 10) {
+                    throw DataUtils.newIllegalStateException(
+                            DataUtils.ERROR_WRITING_FAILED,
+                            "Could not truncate file {0} to size {1}",
+                            fileName, size, e);
+                }
+                System.gc();
+                Thread.yield();
+            }
         }
     }
 
@@ -273,7 +275,7 @@ public class FileStore {
      * @return the number of write operations
      */
     public long getWriteCount() {
-        return writeCount;
+        return writeCount.get();
     }
 
     /**
@@ -282,7 +284,7 @@ public class FileStore {
      * @return the number of write operations
      */
     public long getWriteBytes() {
-        return writeBytes;
+        return writeBytes.get();
     }
 
     /**
@@ -292,7 +294,7 @@ public class FileStore {
      * @return the number of read operations
      */
     public long getReadCount() {
-        return readCount;
+        return readCount.get();
     }
 
     /**
@@ -301,7 +303,7 @@ public class FileStore {
      * @return the number of write operations
      */
     public long getReadBytes() {
-        return readBytes;
+        return readBytes.get();
     }
 
     public boolean isReadOnly() {
@@ -314,7 +316,7 @@ public class FileStore {
      * @return the retention time
      */
     public int getDefaultRetentionTime() {
-        return 45000;
+        return 45_000;
     }
 
     /**
@@ -331,10 +333,30 @@ public class FileStore {
      * Allocate a number of blocks and mark them as used.
      *
      * @param length the number of bytes to allocate
+     * @param reservedLow start block index of the reserved area (inclusive)
+     * @param reservedHigh end block index of the reserved area (exclusive),
+     *                     special value -1 means beginning of the infinite free area
      * @return the start position in bytes
      */
-    public long allocate(int length) {
-        return freeSpace.allocate(length);
+    long allocate(int length, long reservedLow, long reservedHigh) {
+        return freeSpace.allocate(length, reservedLow, reservedHigh);
+    }
+
+    /**
+     * Calculate starting position of the prospective allocation.
+     *
+     * @param blocks the number of blocks to allocate
+     * @param reservedLow start block index of the reserved area (inclusive)
+     * @param reservedHigh end block index of the reserved area (exclusive),
+     *                     special value -1 means beginning of the infinite free area
+     * @return the starting block index
+     */
+    long predictAllocation(int blocks, long reservedLow, long reservedHigh) {
+        return freeSpace.predictAllocation(blocks, reservedLow, reservedHigh);
+    }
+
+    boolean isFragmented() {
+        return freeSpace.isFragmented();
     }
 
     /**
@@ -351,8 +373,39 @@ public class FileStore {
         return freeSpace.getFillRate();
     }
 
+    /**
+     * Calculates a prospective fill rate, which store would have after rewrite
+     * of sparsely populated chunk(s) and evacuation of still live data into a
+     * new chunk.
+     *
+     * @param vacatedBlocks
+     *            number of blocks vacated
+     * @return prospective fill rate (0 - 100)
+     */
+    public int getProjectedFillRate(int vacatedBlocks) {
+        return freeSpace.getProjectedFillRate(vacatedBlocks);
+    }
+
     long getFirstFree() {
         return freeSpace.getFirstFree();
+    }
+
+    long getFileLengthInUse() {
+        return freeSpace.getLastFree();
+    }
+
+    /**
+     * Calculates relative "priority" for chunk to be moved.
+     *
+     * @param block where chunk starts
+     * @return priority, bigger number indicate that chunk need to be moved sooner
+     */
+    int getMovePriority(int block) {
+        return freeSpace.getMovePriority(block);
+    }
+
+    long getAfterLastBlock() {
+        return freeSpace.getAfterLastBlock();
     }
 
     /**

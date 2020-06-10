@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.util;
@@ -12,6 +12,7 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.ObjectStreamClass;
 import java.sql.Connection;
+import java.sql.Driver;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -21,10 +22,10 @@ import java.util.HashSet;
 import java.util.Properties;
 import javax.naming.Context;
 import javax.sql.DataSource;
-import org.h2.api.CustomDataTypesHandler;
 import org.h2.api.ErrorCode;
 import org.h2.api.JavaObjectSerializer;
 import org.h2.engine.SysProperties;
+import org.h2.jdbc.JdbcConnection;
 import org.h2.message.DbException;
 import org.h2.store.DataHandler;
 import org.h2.util.Utils.ClassFactory;
@@ -39,20 +40,15 @@ public class JdbcUtils {
      */
     public static JavaObjectSerializer serializer;
 
-    /**
-     * Custom data types handler to use.
-     */
-    public static CustomDataTypesHandler customDataTypesHandler;
-
     private static final String[] DRIVERS = {
         "h2:", "org.h2.Driver",
         "Cache:", "com.intersys.jdbc.CacheDriver",
         "daffodilDB://", "in.co.daffodil.db.rmi.RmiDaffodilDBDriver",
         "daffodil", "in.co.daffodil.db.jdbc.DaffodilDBDriver",
         "db2:", "com.ibm.db2.jcc.DB2Driver",
-        "derby:net:", "org.apache.derby.jdbc.ClientDriver",
-        "derby://", "org.apache.derby.jdbc.ClientDriver",
-        "derby:", "org.apache.derby.jdbc.EmbeddedDriver",
+        "derby:net:", "org.apache.derby.client.ClientAutoloadedDriver",
+        "derby://", "org.apache.derby.client.ClientAutoloadedDriver",
+        "derby:", "org.apache.derby.iapi.jdbc.AutoloadedDriver",
         "FrontBase:", "com.frontbase.jdbc.FBJDriver",
         "firebirdsql:", "org.firebirdsql.jdbc.FBDriver",
         "hsqldb:", "org.hsqldb.jdbcDriver",
@@ -60,7 +56,8 @@ public class JdbcUtils {
         "jtds:", "net.sourceforge.jtds.jdbc.Driver",
         "microsoft:", "com.microsoft.jdbc.sqlserver.SQLServerDriver",
         "mimer:", "com.mimer.jdbc.Driver",
-        "mysql:", "com.mysql.jdbc.Driver",
+        "mysql:", "com.mysql.cj.jdbc.Driver",
+        "mariadb:", "org.mariadb.jdbc.Driver",
         "odbc:", "sun.jdbc.odbc.JdbcOdbcDriver",
         "oracle:", "oracle.jdbc.driver.OracleDriver",
         "pervasive:", "com.pervasive.jdbc.v2.Driver",
@@ -78,8 +75,7 @@ public class JdbcUtils {
     /**
      *  In order to manage more than one class loader
      */
-    private static ArrayList<ClassFactory> userClassFactories =
-            new ArrayList<ClassFactory>();
+    private static final ArrayList<ClassFactory> userClassFactories = new ArrayList<>();
 
     private static String[] allowedClassNamePrefixes;
 
@@ -93,7 +89,7 @@ public class JdbcUtils {
      * @param classFactory An object that implements ClassFactory
      */
     public static void addClassFactory(ClassFactory classFactory) {
-        getUserClassFactories().add(classFactory);
+        userClassFactories.add(classFactory);
     }
 
     /**
@@ -102,33 +98,14 @@ public class JdbcUtils {
      * @param classFactory Already inserted class factory instance
      */
     public static void removeClassFactory(ClassFactory classFactory) {
-        getUserClassFactories().remove(classFactory);
-    }
-
-    private static ArrayList<ClassFactory> getUserClassFactories() {
-        if (userClassFactories == null) {
-            // initially, it is empty
-            // but Apache Tomcat may clear the fields as well
-            userClassFactories = new ArrayList<ClassFactory>();
-        }
-        return userClassFactories;
+        userClassFactories.remove(classFactory);
     }
 
     static {
         String clazz = SysProperties.JAVA_OBJECT_SERIALIZER;
         if (clazz != null) {
             try {
-                serializer = (JavaObjectSerializer) loadUserClass(clazz).newInstance();
-            } catch (Exception e) {
-                throw DbException.convert(e);
-            }
-        }
-
-        String customTypeHandlerClass = SysProperties.CUSTOM_DATA_TYPES_HANDLER;
-        if (customTypeHandlerClass != null) {
-            try {
-                customDataTypesHandler = (CustomDataTypesHandler)
-                        loadUserClass(customTypeHandlerClass).newInstance();
+                serializer = (JavaObjectSerializer) loadUserClass(clazz).getDeclaredConstructor().newInstance();
             } catch (Exception e) {
                 throw DbException.convert(e);
             }
@@ -148,9 +125,9 @@ public class JdbcUtils {
         if (allowedClassNames == null) {
             // initialize the static fields
             String s = SysProperties.ALLOWED_CLASSES;
-            ArrayList<String> prefixes = New.arrayList();
+            ArrayList<String> prefixes = new ArrayList<>();
             boolean allowAll = false;
-            HashSet<String> classNames = New.hashSet();
+            HashSet<String> classNames = new HashSet<>();
             for (String p : StringUtils.arraySplit(s, ',', true)) {
                 if (p.equals("*")) {
                     allowAll = true;
@@ -160,8 +137,7 @@ public class JdbcUtils {
                     classNames.add(p);
                 }
             }
-            allowedClassNamePrefixes = new String[prefixes.size()];
-            prefixes.toArray(allowedClassNamePrefixes);
+            allowedClassNamePrefixes = prefixes.toArray(new String[0]);
             allowAllClasses = allowAll;
             allowedClassNames = classNames;
         }
@@ -178,11 +154,11 @@ public class JdbcUtils {
             }
         }
         // Use provided class factory first.
-        for (ClassFactory classFactory : getUserClassFactories()) {
+        for (ClassFactory classFactory : userClassFactories) {
             if (classFactory.match(className)) {
                 try {
                     Class<?> userClass = classFactory.loadClass(className);
-                    if (!(userClass == null)) {
+                    if (userClass != null) {
                         return (Class<Z>) userClass;
                     }
                 } catch (Exception e) {
@@ -276,7 +252,7 @@ public class JdbcUtils {
         if (password != null) {
             prop.setProperty("password", password);
         }
-        return getConnection(driver, url, prop);
+        return getConnection(driver, url, prop, null);
     }
 
     /**
@@ -285,20 +261,39 @@ public class JdbcUtils {
      * @param driver the driver class name
      * @param url the database URL
      * @param prop the properties containing at least the user name and password
+     * @param networkConnectionInfo the network connection information, or {@code null}
      * @return the database connection
      */
-    public static Connection getConnection(String driver, String url,
-            Properties prop) throws SQLException {
+    public static Connection getConnection(String driver, String url, Properties prop,
+            NetworkConnectionInfo networkConnectionInfo) throws SQLException {
+        Connection connection = getConnection(driver, url, prop);
+        if (networkConnectionInfo != null && connection instanceof JdbcConnection) {
+            ((JdbcConnection) connection).getSession().setNetworkConnectionInfo(networkConnectionInfo);
+        }
+        return connection;
+    }
+
+    private static Connection getConnection(String driver, String url, Properties prop) throws SQLException {
         if (StringUtils.isNullOrEmpty(driver)) {
             JdbcUtils.load(url);
         } else {
             Class<?> d = loadUserClass(driver);
-            if (java.sql.Driver.class.isAssignableFrom(d)) {
-                return DriverManager.getConnection(url, prop);
-            } else if (javax.naming.Context.class.isAssignableFrom(d)) {
-                // JNDI context
-                try {
-                    Context context = (Context) d.newInstance();
+            try {
+                if (java.sql.Driver.class.isAssignableFrom(d)) {
+                    Driver driverInstance = (Driver) d.getDeclaredConstructor().newInstance();
+                    /*
+                     * fix issue #695 with drivers with the same jdbc
+                     * subprotocol in classpath of jdbc drivers (as example
+                     * redshift and postgresql drivers)
+                     */
+                    Connection connection = driverInstance.connect(url, prop);
+                    if (connection != null) {
+                        return connection;
+                    }
+                    throw new SQLException("Driver " + driver + " is not suitable for " + url, "08001");
+                } else if (javax.naming.Context.class.isAssignableFrom(d)) {
+                    // JNDI context
+                    Context context = (Context) d.getDeclaredConstructor().newInstance();
                     DataSource ds = (DataSource) context.lookup(url);
                     String user = prop.getProperty("user");
                     String password = prop.getProperty("password");
@@ -306,13 +301,11 @@ public class JdbcUtils {
                         return ds.getConnection();
                     }
                     return ds.getConnection(user, password);
-                } catch (Exception e) {
-                    throw DbException.toSQLException(e);
                 }
-            } else {
-                // don't know, but maybe it loaded a JDBC Driver
-                return DriverManager.getConnection(url, prop);
+            } catch (Exception e) {
+                throw DbException.toSQLException(e);
             }
+            // don't know, but maybe it loaded a JDBC Driver
         }
         return DriverManager.getConnection(url, prop);
     }

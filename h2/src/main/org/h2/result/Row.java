@@ -1,88 +1,63 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.result;
 
-import org.h2.store.Data;
 import org.h2.value.Value;
 
 /**
  * Represents a row in a table.
  */
-public interface Row extends SearchRow {
-
-    int MEMORY_CALCULATE = -1;
-    Row[] EMPTY_ARRAY = {};
-
+public abstract class Row extends SearchRow
+{
     /**
-     * Get a copy of the row that is distinct from (not equal to) this row.
-     * This is used for FOR UPDATE to allow pseudo-updating a row.
+     * Creates a new row.
      *
-     * @return a new row with the same data
+     * @param data values of columns, or null
+     * @param memory used memory
+     * @return the allocated row
      */
-    Row getCopy();
+    public static Row get(Value[] data, int memory) {
+        return new DefaultRow(data, memory);
+    }
 
     /**
-     * Set version.
+     * Creates a new row with the specified key.
      *
-     * @param version row version
+     * @param data values of columns, or null
+     * @param memory used memory
+     * @param key the key
+     * @return the allocated row
      */
-    void setVersion(int version);
-
-    /**
-     * Get the number of bytes required for the data.
-     *
-     * @param dummy the template buffer
-     * @return the number of bytes
-     */
-    int getByteCount(Data dummy);
-
-    /**
-     * Check if this is an empty row.
-     *
-     * @return {@code true} if the row is empty
-     */
-    boolean isEmpty();
-
-    /**
-     * Mark the row as deleted.
-     *
-     * @param deleted deleted flag
-     */
-    void setDeleted(boolean deleted);
-
-    /**
-     * Set session id.
-     *
-     * @param sessionId the session id
-     */
-    void setSessionId(int sessionId);
-
-    /**
-     * Get session id.
-     *
-     * @return the session id
-     */
-    int getSessionId();
-
-    /**
-     * This record has been committed. The session id is reset.
-     */
-    void commit();
-
-    /**
-     * Check if the row is deleted.
-     *
-     * @return {@code true} if the row is deleted
-     */
-    boolean isDeleted();
+    public static Row get(Value[] data, int memory, long key) {
+        Row r = new DefaultRow(data, memory);
+        r.setKey(key);
+        return r;
+    }
 
     /**
      * Get values.
      *
      * @return values
      */
-    Value[] getValueList();
+    public abstract Value[] getValueList();
+
+    /**
+     * Check whether this row and the specified row share the same underlying
+     * data with values. This method must return {@code false} when values are
+     * not equal and may return either {@code true} or {@code false} when they
+     * are equal. This method may be used only for optimizations and should not
+     * perform any slow checks, such as equality checks for all pairs of values.
+     *
+     * @param other
+     *            the other row
+     * @return {@code true} if rows share the same underlying data,
+     *         {@code false} otherwise or when unknown
+     */
+    public boolean hasSharedData(Row other) {
+        return false;
+    }
+
 }

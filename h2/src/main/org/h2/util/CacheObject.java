@@ -1,11 +1,10 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.util;
 
-import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
 
 /**
@@ -49,10 +48,8 @@ public abstract class CacheObject implements Comparable<CacheObject> {
     public abstract int getMemory();
 
     public void setPos(int pos) { //没有子类覆盖
-        if (SysProperties.CHECK) {
-            if (cachePrevious != null || cacheNext != null || cacheChained != null) {
-                DbException.throwInternalError("setPos too late");
-            }
+        if (cachePrevious != null || cacheNext != null || cacheChained != null) {
+            DbException.throwInternalError("setPos too late");
         }
         this.pos = pos;
     }
@@ -77,8 +74,12 @@ public abstract class CacheObject implements Comparable<CacheObject> {
     
     //比较pageId，相等为0，当前CacheObject小于other时返回-1，大于时返回1
     @Override
-    public int compareTo(CacheObject other) { //没有子类覆盖
-        return MathUtils.compareInt(getPos(), other.getPos());
+//<<<<<<< HEAD
+//    public int compareTo(CacheObject other) { //没有子类覆盖
+//        return MathUtils.compareInt(getPos(), other.getPos());
+//=======
+    public int compareTo(CacheObject other) {
+        return Integer.compare(getPos(), other.getPos());
     }
     
     //子类org.h2.index.PageDataLeaf和org.h2.index.PageDataOverflow覆盖了此方法，

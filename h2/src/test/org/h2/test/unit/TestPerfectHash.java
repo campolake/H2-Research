@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.unit;
@@ -56,16 +56,9 @@ public class TestPerfectHash extends TestBase {
         RandomAccessFile f = new RandomAccessFile(fileName, "r");
         byte[] data = new byte[(int) f.length()];
         f.readFully(data);
-        UniversalHash<Text> hf = new UniversalHash<Text>() {
-
-            @Override
-            public int hashCode(Text o, int index, int seed) {
-                return o.hashCode(index, seed);
-            }
-
-        };
+        UniversalHash<Text> hf = Text::hashCode;
         f.close();
-        HashSet<Text> set = new HashSet<Text>();
+        HashSet<Text> set = new HashSet<>();
         Text t = new Text(data, 0);
         while (true) {
             set.add(t);
@@ -143,22 +136,17 @@ public class TestPerfectHash extends TestBase {
     private void testBrokenHashFunction() {
         int size = 10000;
         Random r = new Random(10000);
-        HashSet<String> set = new HashSet<String>(size);
+        HashSet<String> set = new HashSet<>(size);
         while (set.size() < size) {
             set.add("x " + r.nextDouble());
         }
         for (int test = 1; test < 10; test++) {
             final int badUntilLevel = test;
-            UniversalHash<String> badHash = new UniversalHash<String>() {
-
-                @Override
-                public int hashCode(String o, int index, int seed) {
-                    if (index < badUntilLevel) {
-                        return 0;
-                    }
-                    return StringHash.getFastHash(o, index, seed);
+            UniversalHash<String> badHash = (o, index, seed) -> {
+                if (index < badUntilLevel) {
+                    return 0;
                 }
-
+                return StringHash.getFastHash(o, index, seed);
             };
             byte[] desc = MinimalPerfectHash.generate(set, badHash);
             testMinimal(desc, set, badHash);
@@ -167,7 +155,7 @@ public class TestPerfectHash extends TestBase {
 
     private int test(int size, boolean minimal) {
         Random r = new Random(size);
-        HashSet<Integer> set = new HashSet<Integer>();
+        HashSet<Integer> set = new HashSet<>();
         while (set.size() < size) {
             set.add(r.nextInt());
         }
@@ -185,7 +173,7 @@ public class TestPerfectHash extends TestBase {
 
     private int test(byte[] desc, Set<Integer> set) {
         int max = -1;
-        HashSet<Integer> test = new HashSet<Integer>();
+        HashSet<Integer> test = new HashSet<>();
         PerfectHash hash = new PerfectHash(desc);
         for (int x : set) {
             int h = hash.get(x);
@@ -200,7 +188,7 @@ public class TestPerfectHash extends TestBase {
 
     private int testMinimal(int size) {
         Random r = new Random(size);
-        HashSet<Long> set = new HashSet<Long>(size);
+        HashSet<Long> set = new HashSet<>(size);
         while (set.size() < size) {
             set.add((long) r.nextInt());
         }
@@ -213,7 +201,7 @@ public class TestPerfectHash extends TestBase {
 
     private int testMinimalWithString(int size) {
         Random r = new Random(size);
-        HashSet<String> set = new HashSet<String>(size);
+        HashSet<String> set = new HashSet<>(size);
         while (set.size() < size) {
             set.add("x " + r.nextDouble());
         }
@@ -227,7 +215,7 @@ public class TestPerfectHash extends TestBase {
     private <K> int testMinimal(byte[] desc, Set<K> set, UniversalHash<K> hf) {
         int max = -1;
         BitSet test = new BitSet();
-        MinimalPerfectHash<K> hash = new MinimalPerfectHash<K>(desc, hf);
+        MinimalPerfectHash<K> hash = new MinimalPerfectHash<>(desc, hf);
         for (K x : set) {
             int h = hash.get(x);
             assertTrue(h >= 0);

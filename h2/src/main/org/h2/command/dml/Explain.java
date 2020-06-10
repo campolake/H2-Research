@@ -1,23 +1,25 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command.dml;
 
+import java.util.HashSet;
 import java.util.Map;
 import java.util.TreeMap;
 import java.util.Map.Entry;
 import org.h2.command.CommandInterface;
 import org.h2.command.Prepared;
 import org.h2.engine.Database;
+import org.h2.engine.DbObject;
 import org.h2.engine.Session;
 import org.h2.expression.Expression;
 import org.h2.expression.ExpressionColumn;
 import org.h2.mvstore.db.MVTableEngine.Store;
+import org.h2.pagestore.PageStore;
 import org.h2.result.LocalResult;
 import org.h2.result.ResultInterface;
-import org.h2.store.PageStore;
 import org.h2.table.Column;
 import org.h2.value.Value;
 import org.h2.value.ValueString;
@@ -68,11 +70,12 @@ public class Explain extends Prepared {
 
     @Override
     public ResultInterface query(int maxrows) {
-        Column column = new Column("PLAN", Value.STRING);
+        Column column = new Column("PLAN", Value.VARCHAR);
         Database db = session.getDatabase();
         ExpressionColumn expr = new ExpressionColumn(db, column);
         Expression[] expressions = { expr };
-        result = new LocalResult(session, expressions, 1);
+        result = new LocalResult(session, expressions, 1, 1);
+        boolean alwaysQuote = true;
         if (maxrows >= 0) {
             String plan;
             if (executeCommand) {
@@ -83,7 +86,7 @@ public class Explain extends Prepared {
                     if (store != null) {
                         store.statisticsStart();
                     }
-                    mvStore = db.getMvStore();
+                    mvStore = db.getStore();
                     if (mvStore != null) {
                         mvStore.statisticsStart();
                     }
@@ -93,7 +96,7 @@ public class Explain extends Prepared {
                 } else {
                     command.update();
                 }
-                plan = command.getPlanSQL();
+                plan = command.getPlanSQL(alwaysQuote);
                 Map<String, Integer> statistics = null;
                 if (store != null) {
                     statistics = store.statisticsEnd();
@@ -112,7 +115,7 @@ public class Explain extends Prepared {
                         total += e.getValue();
                     }
                     if (total > 0) {
-                        statistics = new TreeMap<String, Integer>(statistics);
+                        statistics = new TreeMap<>(statistics);
                         StringBuilder buff = new StringBuilder();
                         if (statistics.size() > 1) {
                             buff.append("total: ").append(total).append('\n');
@@ -130,7 +133,7 @@ public class Explain extends Prepared {
                     }
                 }
             } else {
-                plan = command.getPlanSQL();
+                plan = command.getPlanSQL(alwaysQuote);
             }
             add(plan);
         }
@@ -139,8 +142,7 @@ public class Explain extends Prepared {
     }
 
     private void add(String text) {
-        Value[] row = { ValueString.get(text) };
-        result.addRow(row);
+        result.addRow(ValueString.get(text));
     }
 
     @Override
@@ -162,4 +164,10 @@ public class Explain extends Prepared {
     public int getType() {
         return executeCommand ? CommandInterface.EXPLAIN_ANALYZE : CommandInterface.EXPLAIN;
     }
+
+    @Override
+    public void collectDependencies(HashSet<DbObject> dependencies) {
+        command.collectDependencies(dependencies);
+    }
+
 }

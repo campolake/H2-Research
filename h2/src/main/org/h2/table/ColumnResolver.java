@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.table;
@@ -21,7 +21,9 @@ public interface ColumnResolver {
      *
      * @return the table alias
      */
-    String getTableAlias();
+    default String getTableAlias() {
+        return null;
+    }
 
     /**
      * Get the column list.
@@ -31,25 +33,61 @@ public interface ColumnResolver {
     Column[] getColumns();
 
     /**
+     * Get the column with the specified name.
+     *
+     * @param name
+     *            the column name, must be a derived name if this column
+     *            resolver has a derived column list
+     * @return the column with the specified name, or {@code null}
+     */
+    Column findColumn(String name);
+
+    /**
+     * Get the name of the specified column.
+     *
+     * @param column column
+     * @return column name
+     */
+    default String getColumnName(Column column) {
+        return column.getName();
+    }
+
+    /**
+     * Returns whether this column resolver has a derived column list.
+     *
+     * @return {@code true} if this column resolver has a derived column list,
+     *         {@code false} otherwise
+     */
+    default boolean hasDerivedColumnList() {
+        return false;
+    }
+
+    /**
      * Get the list of system columns, if any.
      *
      * @return the system columns or null
      */
-    Column[] getSystemColumns();
+    default Column[] getSystemColumns() {
+        return null;
+    }
 
     /**
      * Get the row id pseudo column, if there is one.
      *
      * @return the row id column or null
      */
-    Column getRowIdColumn();
+    default Column getRowIdColumn() {
+        return null;
+    }
 
     /**
-     * Get the schema name.
+     * Get the schema name or null.
      *
-     * @return the schema name
+     * @return the schema name or null
      */
-    String getSchemaName();
+    default String getSchemaName() {
+        return null;
+    }
 
     /**
      * Get the value for the given column.
@@ -64,14 +102,18 @@ public interface ColumnResolver {
      *
      * @return the table filter
      */
-    TableFilter getTableFilter();
+    default TableFilter getTableFilter() {
+        return null;
+    }
 
     /**
      * Get the select statement.
      *
      * @return the select statement
      */
-    Select getSelect();
+    default Select getSelect() {
+        return null;
+    }
 
     /**
      * Get the expression that represents this column.
@@ -80,6 +122,8 @@ public interface ColumnResolver {
      * @param column the column
      * @return the optimized expression
      */
-    Expression optimize(ExpressionColumn expressionColumn, Column column);
+    default Expression optimize(ExpressionColumn expressionColumn, Column column) {
+        return expressionColumn;
+    }
 
 }

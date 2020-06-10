@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.dev.hash;
@@ -193,13 +193,13 @@ public class IntPerfectHash {
      * @param list the data
      * @return the hash function description
      */
-    public static <K> byte[] generate(ArrayList<Integer> list) {
+    public static byte[] generate(ArrayList<Integer> list) {
         ByteStream out = new ByteStream();
         generate(list, 0, out);
         return out.toByteArray();
     }
 
-    private static <K> void generate(ArrayList<Integer> list, int level, ByteStream out) {
+    private static void generate(ArrayList<Integer> list, int level, ByteStream out) {
         int size = list.size();
         if (size <= 1) {
             out.write((byte) size);
@@ -234,7 +234,7 @@ public class IntPerfectHash {
             split = (size - 47) / DIVIDE;
         }
         split = Math.max(2, split);
-        ArrayList<ArrayList<Integer>> lists = new ArrayList<ArrayList<Integer>>(split);
+        ArrayList<ArrayList<Integer>> lists = new ArrayList<>(split);
         for (int i = 0; i < split; i++) {
             lists.add(new ArrayList<Integer>(size / split));
         }

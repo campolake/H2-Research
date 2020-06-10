@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.util;
@@ -9,6 +9,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 import java.lang.reflect.Method;
+import java.nio.charset.StandardCharsets;
 import java.security.SecureRandom;
 import java.util.concurrent.ThreadLocalRandom;
 
@@ -20,7 +21,7 @@ public class MathUtils {
     /**
      * The secure random object.
      */
-    static SecureRandom cachedSecureRandom;
+    static SecureRandom secureRandom;
 
     /**
      * True if the secure random object is seeded.
@@ -61,32 +62,29 @@ public class MathUtils {
     }
 
     private static synchronized SecureRandom getSecureRandom() {
-        if (cachedSecureRandom != null) {
-            return cachedSecureRandom;
+        if (secureRandom != null) {
+            return secureRandom;
         }
         // Workaround for SecureRandom problem as described in
-        // http://bugs.sun.com/bugdatabase/view_bug.do?bug_id=6202721
+        // https://bugs.java.com/bugdatabase/view_bug.do?bug_id=6202721
         // Can not do that in a static initializer block, because
         // threads are not started until after the initializer block exits
         try {
-            cachedSecureRandom = SecureRandom.getInstance("SHA1PRNG");
+            secureRandom = SecureRandom.getInstance("SHA1PRNG");
             // On some systems, secureRandom.generateSeed() is very slow.
             // In this case it is initialized using our own seed implementation
             // and afterwards (in the thread) using the regular algorithm.
-            Runnable runnable = new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
-                        byte[] seed = sr.generateSeed(20);
-                        synchronized (cachedSecureRandom) {
-                            cachedSecureRandom.setSeed(seed);
-                            seeded = true;
-                        }
-                    } catch (Exception e) {
-                        // NoSuchAlgorithmException
-                        warn("SecureRandom", e);
+            Runnable runnable = () -> {
+                try {
+                    SecureRandom sr = SecureRandom.getInstance("SHA1PRNG");
+                    byte[] seed = sr.generateSeed(20);
+                    synchronized (secureRandom) {
+                        secureRandom.setSeed(seed);
+                        seeded = true;
                     }
+                } catch (Exception e) {
+                    // NoSuchAlgorithmException
+                    warn("SecureRandom", e);
                 }
             };
 
@@ -106,8 +104,8 @@ public class MathUtils {
                 if (!seeded) {
                     byte[] seed = generateAlternativeSeed();
                     // this never reduces randomness
-                    synchronized (cachedSecureRandom) {
-                        cachedSecureRandom.setSeed(seed);
+                    synchronized (secureRandom) {
+                        secureRandom.setSeed(seed);
                     }
                 }
             } catch (SecurityException e) {
@@ -119,9 +117,9 @@ public class MathUtils {
         } catch (Exception e) {
             // NoSuchAlgorithmException
             warn("SecureRandom", e);
-            cachedSecureRandom = new SecureRandom();
+            secureRandom = new SecureRandom();
         }
-        return cachedSecureRandom;
+        return secureRandom;
     }
 
     /**
@@ -151,7 +149,7 @@ public class MathUtils {
                 // can't use writeUTF, as the string
                 // might be larger than 64 KB
                 out.writeInt(s.length());
-                out.write(s.getBytes("UTF-8"));
+                out.write(s.getBytes(StandardCharsets.UTF_8));
             } catch (Exception e) {
                 warn("generateAlternativeSeed", e);
             }
@@ -213,23 +211,32 @@ public class MathUtils {
     }
 
     /**
-     * Get the value that is equal or higher than this value, and that is a
+     * Get the value that is equal to or higher than this value, and that is a
      * power of two.
      *
      * @param x the original value
      * @return the next power of two value
+     * @throws IllegalArgumentException if x < 0 or x > 0x40000000
      */
-    public static int nextPowerOf2(int x) {
-        long i = 1;
-        while (i < x && i < (Integer.MAX_VALUE / 2)) {
-            i += i;
+    public static int nextPowerOf2(int x) throws IllegalArgumentException {
+        if (x == 0) {
+            return 1;
+        } else if (x < 0 || x > 0x4000_0000 ) {
+            throw new IllegalArgumentException("Argument out of range"
+                    + " [0x0-0x40000000]. Argument was: " + x);
         }
-        return (int) i;
+        x--;
+        x |= x >> 1;
+        x |= x >> 2;
+        x |= x >> 4;
+        x |= x >> 8;
+        x |= x >> 16;
+        return ++x;
     }
 
     /**
      * Convert a long value to an int value. Values larger than the biggest int
-     * value is converted to the biggest int value, and values smaller than the
+     * value are converted to the biggest int value, and values smaller than the
      * smallest int value are converted to the smallest int value.
      *
      * @param l the value to convert
@@ -246,27 +253,21 @@ public class MathUtils {
     }
 
     /**
-     * Compare two values. Returns -1 if the first value is smaller, 1 if
-     * bigger, and 0 if equal.
+     * Convert an int value to a short value. Values larger than the biggest
+     * short value are converted to the biggest short value, and values smaller
+     * than the smallest short value are converted to the smallest short value.
      *
-     * @param a the first value
-     * @param b the second value
-     * @return the result
+     * @param i the value to convert
+     * @return the converted short value
      */
-    public static int compareInt(int a, int b) {
-        return a == b ? 0 : a < b ? -1 : 1;
-    }
-
-    /**
-     * Compare two values. Returns -1 if the first value is smaller, 1 if
-     * bigger, and 0 if equal.
-     *
-     * @param a the first value
-     * @param b the second value
-     * @return the result
-     */
-    public static int compareLong(long a, long b) {
-        return a == b ? 0 : a < b ? -1 : 1;
+    public static short convertIntToShort(int i) {
+        if (i <= Short.MIN_VALUE) {
+            return Short.MIN_VALUE;
+        } else if (i >= Short.MAX_VALUE) {
+            return Short.MAX_VALUE;
+        } else {
+            return (short) i;
+        }
     }
 
     /**
@@ -275,10 +276,7 @@ public class MathUtils {
      * @return the random long value
      */
     public static long secureRandomLong() {
-        SecureRandom sr = getSecureRandom();
-        synchronized (sr) {
-            return sr.nextLong();
-        }
+        return getSecureRandom().nextLong();
     }
 
     /**
@@ -301,10 +299,7 @@ public class MathUtils {
             len = 1;
         }
         byte[] buff = new byte[len];
-        SecureRandom sr = getSecureRandom();
-        synchronized (sr) {
-            sr.nextBytes(buff);
-        }
+        getSecureRandom().nextBytes(buff);
         return buff;
     }
 
@@ -327,10 +322,7 @@ public class MathUtils {
      * @return the random long value
      */
     public static int secureRandomInt(int lowerThan) {
-        SecureRandom sr = getSecureRandom();
-        synchronized (sr) {
-            return sr.nextInt(lowerThan);
-        }
+        return getSecureRandom().nextInt(lowerThan);
     }
 
 }

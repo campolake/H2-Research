@@ -1,19 +1,20 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
 
-import java.sql.Date;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.sql.Types;
 
 import org.h2.api.ErrorCode;
+import org.h2.engine.CastDataProvider;
 import org.h2.message.DbException;
 import org.h2.util.DateTimeUtils;
-import org.h2.util.MathUtils;
-import org.h2.util.StringUtils;
+import org.h2.util.JSR310Utils;
+import org.h2.util.LegacyDateTimeUtils;
 
 /**
  * Implementation of the DATE data type.
@@ -21,19 +22,17 @@ import org.h2.util.StringUtils;
 public class ValueDate extends Value {
 
     /**
-     * The precision in digits.
-     */
-    public static final int PRECISION = 8;
-
-    /**
-     * The display size of the textual representation of a date.
+     * The default precision and display size of the textual representation of a date.
      * Example: 2000-01-02
      */
-    public static final int DISPLAY_SIZE = 10;
+    public static final int PRECISION = 10;
 
     private final long dateValue;
 
     private ValueDate(long dateValue) {
+        if (dateValue < DateTimeUtils.MIN_DATE_VALUE || dateValue > DateTimeUtils.MAX_DATE_VALUE) {
+            throw new IllegalArgumentException("dateValue out of range " + dateValue);
+        }
         this.dateValue = dateValue;
     }
 
@@ -45,27 +44,6 @@ public class ValueDate extends Value {
      */
     public static ValueDate fromDateValue(long dateValue) {
         return (ValueDate) Value.cache(new ValueDate(dateValue));
-    }
-
-    /**
-     * Get or create a date value for the given date.
-     *
-     * @param date the date
-     * @return the value
-     */
-    public static ValueDate get(Date date) {
-        return fromDateValue(DateTimeUtils.dateValueFromDate(date.getTime()));
-    }
-
-    /**
-     * Calculate the date value (in the default timezone) from a given time in
-     * milliseconds in UTC.
-     *
-     * @param ms the milliseconds
-     * @return the value
-     */
-    public static ValueDate fromMillis(long ms) {
-        return fromDateValue(DateTimeUtils.dateValueFromDate(ms));
     }
 
     /**
@@ -88,40 +66,31 @@ public class ValueDate extends Value {
     }
 
     @Override
-    public Date getDate() {
-        return DateTimeUtils.convertDateValueToDate(dateValue);
+    public TypeInfo getType() {
+        return TypeInfo.TYPE_DATE;
     }
 
     @Override
-    public int getType() {
-        return Value.DATE;
+    public int getValueType() {
+        return DATE;
     }
 
     @Override
     public String getString() {
-        StringBuilder buff = new StringBuilder(DISPLAY_SIZE);
-        appendDate(buff, dateValue);
-        return buff.toString();
+        StringBuilder builder = new StringBuilder(PRECISION);
+        DateTimeUtils.appendDate(builder, dateValue);
+        return builder.toString();
     }
 
     @Override
-    public String getSQL() {
-        return "DATE '" + getString() + "'";
+    public StringBuilder getSQL(StringBuilder builder) {
+        DateTimeUtils.appendDate(builder.append("DATE '"), dateValue);
+        return builder.append('\'');
     }
 
     @Override
-    public long getPrecision() {
-        return PRECISION;
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return DISPLAY_SIZE;
-    }
-
-    @Override
-    protected int compareSecure(Value o, CompareMode mode) {
-        return MathUtils.compareLong(dateValue, ((ValueDate) o).dateValue);
+    public int compareTypeSafe(Value o, CompareMode mode, CastDataProvider provider) {
+        return Long.compare(dateValue, ((ValueDate) o).dateValue);
     }
 
     @Override
@@ -140,34 +109,18 @@ public class ValueDate extends Value {
 
     @Override
     public Object getObject() {
-        return getDate();
+        return JSR310Utils.valueToLocalDate(this, null);
     }
 
     @Override
-    public void set(PreparedStatement prep, int parameterIndex)
-            throws SQLException {
-        prep.setDate(parameterIndex, getDate());
-    }
-
-    /**
-     * Append a date to the string builder.
-     *
-     * @param buff the target string builder
-     * @param dateValue the date value
-     */
-    static void appendDate(StringBuilder buff, long dateValue) {
-        int y = DateTimeUtils.yearFromDateValue(dateValue);
-        int m = DateTimeUtils.monthFromDateValue(dateValue);
-        int d = DateTimeUtils.dayFromDateValue(dateValue);
-        if (y > 0 && y < 10000) {
-            StringUtils.appendZeroPadded(buff, 4, y);
-        } else {
-            buff.append(y);
+    public void set(PreparedStatement prep, int parameterIndex) throws SQLException {
+        try {
+            prep.setObject(parameterIndex, JSR310Utils.valueToLocalDate(this, null), Types.DATE);
+            return;
+        } catch (SQLException ignore) {
+            // Nothing to do
         }
-        buff.append('-');
-        StringUtils.appendZeroPadded(buff, 2, m);
-        buff.append('-');
-        StringUtils.appendZeroPadded(buff, 2, d);
+        prep.setDate(parameterIndex, LegacyDateTimeUtils.toDate(null, null, this));
     }
 
 }

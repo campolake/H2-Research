@@ -1,16 +1,16 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.samples;
 
-import java.io.File;
-import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.InputStreamReader;
-import java.io.OutputStreamWriter;
-import java.io.Writer;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -32,11 +32,11 @@ public class Newsfeed {
      * @param args the command line parameters
      */
     public static void main(String... args) throws Exception {
-        String targetDir = args.length == 0 ? "." : args[0];
+        Path targetDir = Paths.get(args.length == 0 ? "." : args[0]);
         Class.forName("org.h2.Driver");
         Connection conn = DriverManager.getConnection("jdbc:h2:mem:", "sa", "");
         InputStream in = Newsfeed.class.getResourceAsStream("newsfeed.sql");
-        ResultSet rs = RunScript.execute(conn, new InputStreamReader(in, "ISO-8859-1"));
+        ResultSet rs = RunScript.execute(conn, new InputStreamReader(in, StandardCharsets.ISO_8859_1));
         in.close();
         while (rs.next()) {
             String file = rs.getString("FILE");
@@ -44,12 +44,8 @@ public class Newsfeed {
             if (file.endsWith(".txt")) {
                 content = convertHtml2Text(content);
             }
-            new File(targetDir).mkdirs();
-            FileOutputStream out = new FileOutputStream(targetDir + "/" + file);
-            Writer writer = new OutputStreamWriter(out, "UTF-8");
-            writer.write(content);
-            writer.close();
-            out.close();
+            Files.createDirectories(targetDir);
+            Files.write(targetDir.resolve(file), content.getBytes(StandardCharsets.UTF_8));
         }
         conn.close();
     }

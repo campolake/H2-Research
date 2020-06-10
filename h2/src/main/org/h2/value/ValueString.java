@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.value;
@@ -8,6 +8,7 @@ package org.h2.value;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 
+import org.h2.engine.CastDataProvider;
 import org.h2.engine.SysProperties;
 import org.h2.util.MathUtils;
 import org.h2.util.StringUtils;
@@ -18,20 +19,26 @@ import org.h2.util.StringUtils;
  */
 public class ValueString extends Value {
 
-    private static final ValueString EMPTY = new ValueString("");
+    /**
+     * Empty string. Should not be used in places where empty string can be
+     * treated as {@code NULL} depending on database mode.
+     */
+    public static final ValueString EMPTY = new ValueString("");
 
     /**
      * The string data.
      */
     protected final String value;
 
+    private TypeInfo type;
+
     protected ValueString(String value) {
         this.value = value;
     }
 
     @Override
-    public String getSQL() {
-        return StringUtils.quoteStringSQL(value);
+    public StringBuilder getSQL(StringBuilder builder) {
+        return StringUtils.quoteStringSQL(builder, value);
     }
 
     @Override
@@ -41,20 +48,13 @@ public class ValueString extends Value {
     }
 
     @Override
-    protected int compareSecure(Value o, CompareMode mode) {
-        // compatibility: the other object could be another type
-        ValueString v = (ValueString) o;
-        return mode.compareString(value, v.value, false);
+    public int compareTypeSafe(Value o, CompareMode mode, CastDataProvider provider) {
+        return mode.compareString(value, ((ValueString) o).value, false);
     }
 
     @Override
     public String getString() {
         return value;
-    }
-
-    @Override
-    public long getPrecision() {
-        return value.length();
     }
 
     @Override
@@ -69,22 +69,21 @@ public class ValueString extends Value {
     }
 
     @Override
-    public int getDisplaySize() {
-        return value.length();
-    }
-
-    @Override
     public int getMemory() {
-    	//一个字符占两个字节所以要乘以2
-        return value.length() * 2 + 48;
+        /*
+         * Java 11 with -XX:-UseCompressedOops
+         * Empty string: 88 bytes
+         * 1 to 4 UTF-16 chars: 96 bytes
+         */
+        return value.length() * 2 + 94; //一个字符占两个字节所以要乘以2
     }
 
     @Override
-    public Value convertPrecision(long precision, boolean force) {
-        if (precision == 0 || value.length() <= precision) {
+    public Value convertPrecision(long precision) {
+        int p = MathUtils.convertLongToInt(precision);
+        if (value.length() <= p) {
             return this;
         }
-        int p = MathUtils.convertLongToInt(precision);
         return getNew(value.substring(0, p));
     }
 
@@ -121,8 +120,18 @@ public class ValueString extends Value {
     }
 
     @Override
-    public int getType() {
-        return Value.STRING;
+    public final TypeInfo getType() {
+        TypeInfo type = this.type;
+        if (type == null) {
+            int length = value.length();
+            this.type = type = new TypeInfo(getValueType(), length, 0, length, null);
+        }
+        return type;
+    }
+
+    @Override
+    public int getValueType() {
+        return VARCHAR;
     }
 
     /**
@@ -132,20 +141,19 @@ public class ValueString extends Value {
      * @return the value
      */
     public static Value get(String s) {
-        return get(s, false);
+        return get(s, null);
     }
 
     /**
      * Get or create a string value for the given string.
      *
      * @param s the string
-     * @param treatEmptyStringsAsNull whether or not to treat empty strings as
-     *            NULL
+     * @param provider the cast information provider, or {@code null}
      * @return the value
      */
-    public static Value get(String s, boolean treatEmptyStringsAsNull) {
+    public static Value get(String s, CastDataProvider provider) {
         if (s.isEmpty()) {
-            return treatEmptyStringsAsNull ? ValueNull.INSTANCE : EMPTY;
+            return provider != null && provider.getMode().treatEmptyStringsAsNull ? ValueNull.INSTANCE : EMPTY;
         }
         ValueString obj = new ValueString(StringUtils.cache(s));
         //字符串长度太大时就不缓存了

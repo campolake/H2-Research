@@ -1,14 +1,11 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.dev.util;
 
 import java.util.Iterator;
-
-import org.h2.mvstore.DataUtils;
-
 
 /**
  * A very simple linked list that supports concurrent access.
@@ -22,7 +19,7 @@ public class ConcurrentLinkedList<K> {
     /**
      * The sentinel entry.
      */
-    static final Entry<?> NULL = new Entry<Object>(null, null);
+    static final Entry<?> NULL = new Entry<>(null, null);
 
     /**
      * The head entry.
@@ -112,11 +109,6 @@ public class ConcurrentLinkedList<K> {
                 return x;
             }
 
-            @Override
-            public void remove() {
-                throw DataUtils.newUnsupportedOperationException("remove");
-            }
-
         };
     }
 
@@ -135,9 +127,9 @@ public class ConcurrentLinkedList<K> {
         @SuppressWarnings("unchecked")
         static <K> Entry<K> append(Entry<K> list, K obj) {
             if (list == NULL) {
-                return new Entry<K>(obj, (Entry<K>) NULL);
+                return new Entry<>(obj, (Entry<K>) NULL);
             }
-            return new Entry<K>(list.obj, append(list.next, obj));
+            return new Entry<>(list.obj, append(list.next, obj));
         }
 
         @SuppressWarnings("unchecked")
@@ -145,7 +137,7 @@ public class ConcurrentLinkedList<K> {
             if (list == NULL || list.next == NULL) {
                 return (Entry<K>) NULL;
             }
-            return new Entry<K>(list.obj, removeLast(list.next));
+            return new Entry<>(list.obj, removeLast(list.next));
         }
 
     }

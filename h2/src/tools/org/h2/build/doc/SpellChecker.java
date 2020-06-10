@@ -1,12 +1,14 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.build.doc;
 
-import java.io.File;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -31,7 +33,7 @@ public class SpellChecker {
             "properties", "task", "MF", "mf", "sh", "" };
     private static final String[] IGNORE = { "dev", "nsi", "gif", "png", "odg",
             "ico", "sxd", "zip", "bz2", "rc", "layout", "res", "dll", "jar",
-            "svg", "prefs", "prop", "iml" };
+            "svg", "prefs", "prop", "iml", "class" };
     private static final String DELIMITERS =
             " \n.();-\"=,*/{}_<>+\r:'@[]&\\!#|?$^%~`\t";
     private static final String PREFIX_IGNORE = "abc";
@@ -51,11 +53,11 @@ public class SpellChecker {
     public boolean printDictionary;
 
     private final HashSet<String> dictionary =
-            new HashSet<String>();
+            new HashSet<>();
     private final HashSet<String> used =
-            new HashSet<String>();
+            new HashSet<>();
     private final HashMap<String, Integer> unknown =
-            new HashMap<String, Integer>();
+            new HashMap<>();
     private boolean addToDictionary;
     private int errorCount;
     private int contextCount;
@@ -72,17 +74,16 @@ public class SpellChecker {
     }
 
     private void run(String dictionaryFileName, String dir) throws IOException {
-        process(new File(dictionaryFileName));
-        process(new File(dir));
-        HashSet<String> unused = new HashSet<String>();
+        process(Paths.get(dictionaryFileName));
+        process(Paths.get(dir));
+        HashSet<String> unused = new HashSet<>();
         unused.addAll(dictionary);
         unused.removeAll(used);
         // System.out.println("UNUSED WORDS");
         // System.out.println(unused);
         if (printDictionary) {
             System.out.println("USED WORDS");
-            String[] list = new String[used.size()];
-            used.toArray(list);
+            String[] list = used.toArray(new String[used.size()]);
             Arrays.sort(list);
             StringBuilder buff = new StringBuilder();
             for (String s : list) {
@@ -114,20 +115,20 @@ public class SpellChecker {
         }
     }
 
-    private void process(File file) throws IOException {
-        String name = file.getName();
+    private void process(Path file) throws IOException {
+        String name = file.getFileName().toString();
         if (name.endsWith(".svn") || name.endsWith(".DS_Store")) {
             return;
         }
         if (name.startsWith("_") && name.indexOf("_en") < 0) {
             return;
         }
-        if (file.isDirectory()) {
-            for (File f : file.listFiles()) {
+        if (Files.isDirectory(file)) {
+            for (Path f : Files.newDirectoryStream(file)) {
                 process(f);
             }
         } else {
-            String fileName = file.getAbsolutePath();
+            String fileName = file.toAbsolutePath().toString();
             int idx = fileName.lastIndexOf('.');
             String suffix;
             if (idx < 0) {
@@ -167,7 +168,7 @@ public class SpellChecker {
     }
 
     private void scan(String fileName, String text) {
-        HashSet<String> notFound = new HashSet<String>();
+        HashSet<String> notFound = new HashSet<>();
         text = removeLinks(fileName, text);
         StringTokenizer tokenizer = new StringTokenizer(text, DELIMITERS);
         while (tokenizer.hasMoreTokens()) {

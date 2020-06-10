@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.db;
@@ -14,11 +14,12 @@ import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.store.fs.FileUtils;
 import org.h2.test.TestBase;
+import org.h2.test.TestDb;
 
 /**
  * Temporary table tests.
  */
-public class TestTempTables extends TestBase {
+public class TestTempTables extends TestDb {
 
     /**
      * Run just this test.
@@ -197,7 +198,7 @@ public class TestTempTables extends TestBase {
         stat.execute("commit");
         stat.execute("insert into test values(2)");
         stat.execute("create local temporary table temp(" +
-                "id int primary key, name varchar, constraint x index(name)) transactional");
+                "id int primary key, name varchar, constraint x unique(name)) transactional");
         stat.execute("insert into temp values(3, 'test')");
         stat.execute("rollback");
         rs = stat.executeQuery("select * from test");
@@ -327,6 +328,9 @@ public class TestTempTables extends TestBase {
      * transaction table in the MVStore
      */
     private void testLotsOfTables() throws SQLException {
+        if (config.networked || config.throttle > 0) {
+            return; // just to save some testing time
+        }
         deleteDb("tempTables");
         Connection conn = getConnection("tempTables");
         Statement stat = conn.createStatement();

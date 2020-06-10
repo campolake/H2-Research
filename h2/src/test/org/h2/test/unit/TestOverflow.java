@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.unit;
@@ -8,8 +8,8 @@ package org.h2.test.unit;
 import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Random;
+
 import org.h2.test.TestBase;
-import org.h2.util.New;
 import org.h2.value.Value;
 import org.h2.value.ValueString;
 
@@ -35,14 +35,14 @@ public class TestOverflow extends TestBase {
 
     @Override
     public void test() {
-        test(Value.BYTE, Byte.MIN_VALUE, Byte.MAX_VALUE);
+        test(Value.TINYINT, Byte.MIN_VALUE, Byte.MAX_VALUE);
         test(Value.INT, Integer.MIN_VALUE, Integer.MAX_VALUE);
-        test(Value.LONG, Long.MIN_VALUE, Long.MAX_VALUE);
-        test(Value.SHORT, Short.MIN_VALUE, Short.MAX_VALUE);
+        test(Value.BIGINT, Long.MIN_VALUE, Long.MAX_VALUE);
+        test(Value.SMALLINT, Short.MIN_VALUE, Short.MAX_VALUE);
     }
 
     private void test(int type, long minValue, long maxValue) {
-        values = New.arrayList();
+        values = new ArrayList<>();
         this.dataType = type;
         this.min = new BigInteger("" + minValue);
         this.max = new BigInteger("" + maxValue);

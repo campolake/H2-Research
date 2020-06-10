@@ -1,16 +1,20 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
 
 import java.util.HashMap;
 
+import org.h2.api.ErrorCode;
+import org.h2.message.DbException;
+import org.h2.util.Utils;
+
 /**
  * This class contains various database-level settings. To override the
  * documented default value for a database, append the setting in the database
- * URL: "jdbc:h2:test;ALIAS_COLUMN_NAME=TRUE" when opening the first connection
+ * URL: "jdbc:h2:./test;ALIAS_COLUMN_NAME=TRUE" when opening the first connection
  * to the database. The settings can not be changed once the database is open.
  * <p>
  * Some settings are a last resort and temporary solution to work around a
@@ -21,7 +25,16 @@ import java.util.HashMap;
  */
 public class DbSettings extends SettingsBase {
 
-    private static DbSettings defaultSettings;
+    /**
+     * The initial size of the hash table.
+     */
+    static final int TABLE_SIZE = 64;
+
+    /**
+     * INTERNAL.
+     * The default settings. Those must not be modified.
+     */
+    public static final DbSettings DEFAULT = new DbSettings(new HashMap<>(TABLE_SIZE));
 
     /**
      * Database setting <code>ALIAS_COLUMN_NAME</code> (default: false).<br />
@@ -51,17 +64,43 @@ public class DbSettings extends SettingsBase {
      * Database setting <code>ANALYZE_SAMPLE</code> (default: 10000).<br />
      * The default sample size when analyzing a table.
      */
-    public final int analyzeSample = get("ANALYZE_SAMPLE", 10000);
+    public final int analyzeSample = get("ANALYZE_SAMPLE", 10_000);
+
+    /**
+     * Database setting <code>AUTO_COMPACT_FILL_RATE</code>
+     * (default: 90, which means 90%, 0 disables auto-compacting).<br />
+     * Set the auto-compact target fill rate. If the average fill rate (the
+     * percentage of the storage space that contains active data) of the
+     * chunks is lower, then the chunks with a low fill rate are re-written.
+     * Also, if the percentage of empty space between chunks is higher than
+     * this value, then chunks at the end of the file are moved. Compaction
+     * stops if the target fill rate is reached.<br />
+     * This setting only affects MVStore engine.
+     */
+    public final int autoCompactFillRate = get("AUTO_COMPACT_FILL_RATE", 90);
+
+    /**
+     * Database setting <code>DATABASE_TO_LOWER</code> (default: false).<br />
+     * When set to true unquoted identifiers and short name of database are
+     * converted to lower case. Value of this setting should not be changed
+     * after creation of database. Setting this to "true" is experimental.
+     */
+    public final boolean databaseToLower;
 
     /**
      * Database setting <code>DATABASE_TO_UPPER</code> (default: true).<br />
-     * Database short names are converted to uppercase for the DATABASE()
-     * function, and in the CATALOG column of all database meta data methods.
-     * Setting this to "false" is experimental. When set to false, all
-     * identifier names (table names, column names) are case sensitive (except
-     * aggregate, built-in functions, data types, and keywords).
+     * When set to true unquoted identifiers and short name of database are
+     * converted to upper case.
      */
-    public final boolean databaseToUpper = get("DATABASE_TO_UPPER", true);
+    public final boolean databaseToUpper;
+
+    /**
+     * Database setting <code>CASE_INSENSITIVE_IDENTIFIERS</code> (default:
+     * false).<br />
+     * When set to true, all identifier names (table names, column names) are
+     * case insensitive. Setting this to "true" is experimental.
+     */
+    public final boolean caseInsensitiveIdentifiers = get("CASE_INSENSITIVE_IDENTIFIERS", false);
 
     /**
      * Database setting <code>DB_CLOSE_ON_EXIT</code> (default: true).<br />
@@ -78,7 +117,7 @@ public class DbSettings extends SettingsBase {
      * performance reasons. Please note the Oracle JDBC driver will try to
      * resolve this database URL if it is loaded before the H2 driver.
      */
-    public boolean defaultConnection = get("DEFAULT_CONNECTION", false);
+    public final boolean defaultConnection = get("DEFAULT_CONNECTION", false);
 
     /**
      * Database setting <code>DEFAULT_ESCAPE</code> (default: \).<br />
@@ -97,16 +136,10 @@ public class DbSettings extends SettingsBase {
 
     /**
      * Database setting <code>DROP_RESTRICT</code> (default: true).<br />
-     * Whether the default action for DROP TABLE and DROP VIEW is RESTRICT.
+     * Whether the default action for DROP TABLE, DROP VIEW, DROP SCHEMA, DROP
+     * DOMAIN, and DROP CONSTRAINT is RESTRICT.
      */
     public final boolean dropRestrict = get("DROP_RESTRICT", true);
-
-    /**
-     * Database setting <code>EARLY_FILTER</code> (default: false).<br />
-     * This setting allows table implementations to apply filter conditions
-     * early on.
-     */
-    public final boolean earlyFilter = get("EARLY_FILTER", false);
 
     /**
      * Database setting <code>ESTIMATED_FUNCTION_TABLE_ROWS</code> (default:
@@ -128,24 +161,19 @@ public class DbSettings extends SettingsBase {
     public final boolean functionsInSchema = get("FUNCTIONS_IN_SCHEMA", true);
 
     /**
-     * Database setting <code>LARGE_TRANSACTIONS</code> (default: true).<br />
-     * Support very large transactions
-     */
-    public final boolean largeTransactions = get("LARGE_TRANSACTIONS", true);
-
-    /**
      * Database setting <code>LOB_TIMEOUT</code> (default: 300000,
      * which means 5 minutes).<br />
      * The number of milliseconds a temporary LOB reference is kept until it
      * times out. After the timeout, the LOB is no longer accessible using this
      * reference.
      */
-    public final int lobTimeout = get("LOB_TIMEOUT", 300000);
+    public final int lobTimeout = get("LOB_TIMEOUT", 300_000);
 
     /**
      * Database setting <code>MAX_COMPACT_COUNT</code>
      * (default: Integer.MAX_VALUE).<br />
-     * The maximum number of pages to move when closing a database.
+     * The maximum number of pages to move when closing a database.<br />
+     * This setting only affects PageStore engine.
      */
     public final int maxCompactCount = get("MAX_COMPACT_COUNT",
             Integer.MAX_VALUE);
@@ -162,13 +190,7 @@ public class DbSettings extends SettingsBase {
      * no limit. Please note the actual query timeout may be set to a lower
      * value.
      */
-    public int maxQueryTimeout = get("MAX_QUERY_TIMEOUT", 0);
-
-    /**
-     * Database setting <code>NESTED_JOINS</code> (default: true).<br />
-     * Whether nested joins should be supported.
-     */
-    public final boolean nestedJoins = get("NESTED_JOINS", true);
+    public final int maxQueryTimeout = get("MAX_QUERY_TIMEOUT", 0);
 
     /**
      * Database setting <code>OPTIMIZE_DISTINCT</code> (default: true).<br />
@@ -216,12 +238,15 @@ public class DbSettings extends SettingsBase {
     public final boolean optimizeInSelect = get("OPTIMIZE_IN_SELECT", true);
 
     /**
+<<<<<<< HEAD
      * Database setting <code>OPTIMIZE_IS_NULL</code> (default: true).<br />
      * Use an index for condition of the form columnName IS NULL.
      */
     public final boolean optimizeIsNull = get("OPTIMIZE_IS_NULL", true);
 
     /**
+=======
+>>>>>>> 6fde1368b355273493c128809eef768e74e2cd1a
      * Database setting <code>OPTIMIZE_OR</code> (default: true).<br />
      * Convert (C=? OR C=?) to (C IN(?, ?)).
      */
@@ -283,35 +308,12 @@ public class DbSettings extends SettingsBase {
     public final boolean recompileAlways = get("RECOMPILE_ALWAYS", false);
 
     /**
-     * Database setting <code>RECONNECT_CHECK_DELAY</code> (default: 200).<br />
-     * Check the .lock.db file every this many milliseconds to detect that the
-     * database was changed. The process writing to the database must first
-     * notify a change in the .lock.db file, then wait twice this many
-     * milliseconds before updating the database.
-     */
-    public final int reconnectCheckDelay = get("RECONNECT_CHECK_DELAY", 200);
-
-    /**
      * Database setting <code>REUSE_SPACE</code> (default: true).<br />
      * If disabled, all changes are appended to the database file, and existing
      * content is never overwritten. This setting has no effect if the database
      * is already open.
      */
     public final boolean reuseSpace = get("REUSE_SPACE", true);
-
-    /**
-     * Database setting <code>ROWID</code> (default: true).<br />
-     * If set, each table has a pseudo-column _ROWID_.
-     */
-    public final boolean rowId = get("ROWID", true);
-
-    /**
-     * Database setting <code>SELECT_FOR_UPDATE_MVCC</code>
-     * (default: true).<br />
-     * If set, SELECT .. FOR UPDATE queries lock only the selected rows when
-     * using MVCC.
-     */
-    public final boolean selectForUpdateMvcc = get("SELECT_FOR_UPDATE_MVCC", true);
 
     /**
      * Database setting <code>SHARE_LINKED_CONNECTIONS</code>
@@ -332,10 +334,10 @@ public class DbSettings extends SettingsBase {
 
     /**
      * Database setting <code>MV_STORE</code>
-     * (default: false for version 1.3, true for version 1.4).<br />
+     * (default: true).<br />
      * Use the MVStore storage engine.
      */
-    public boolean mvStore = get("MV_STORE", Constants.VERSION_MINOR >= 4);
+    public boolean mvStore = get("MV_STORE", true);
 
     /**
      * Database setting <code>COMPRESS</code>
@@ -345,13 +347,44 @@ public class DbSettings extends SettingsBase {
     public final boolean compressData = get("COMPRESS", false);
 
     /**
-     * Database setting <code>MULTI_THREADED</code>
+     * Database setting <code>IGNORE_CATALOGS</code>
      * (default: false).<br />
+     * If set, all catalog names in identifiers are silently accepted
+     * without comparing them with the short name of the database.
      */
-    public final boolean multiThreaded = get("MULTI_THREADED", false);
+    public final boolean ignoreCatalogs = get("IGNORE_CATALOGS", false);
 
     private DbSettings(HashMap<String, String> s) {
         super(s);
+        if (s.get("NESTED_JOINS") != null || Utils.getProperty("h2.nestedJoins", null) != null) {
+            throw DbException.getUnsupportedException("NESTED_JOINS setting is not available since 1.4.197");
+        }
+        boolean lower = get("DATABASE_TO_LOWER", false);
+        boolean upperSet = containsKey("DATABASE_TO_UPPER");
+        boolean upper = get("DATABASE_TO_UPPER", true);
+        if (lower && upper) {
+            if (upperSet) {
+                throw DbException.get(ErrorCode.UNSUPPORTED_SETTING_COMBINATION,
+                        "DATABASE_TO_LOWER & DATABASE_TO_UPPER");
+            }
+            upper = false;
+        }
+        databaseToLower = lower;
+        databaseToUpper = upper;
+        HashMap<String, String> settings = getSettings();
+        settings.put("DATABASE_TO_LOWER", Boolean.toString(lower));
+        settings.put("DATABASE_TO_UPPER", Boolean.toString(upper));
+    }
+
+    /**
+     * Sets the database engine setting.
+     *
+     * @param mvStore
+     *            true for MVStore engine, false for PageStore engine
+     */
+    void setMvStore(boolean mvStore) {
+        this.mvStore = mvStore;
+        set("MV_STORE", mvStore);
     }
 
     /**
@@ -363,19 +396,6 @@ public class DbSettings extends SettingsBase {
      */
     public static DbSettings getInstance(HashMap<String, String> s) {
         return new DbSettings(s);
-    }
-
-    /**
-     * INTERNAL.
-     * Get the default settings. Those must not be modified.
-     *
-     * @return the settings
-     */
-    public static DbSettings getDefaultSettings() {
-        if (defaultSettings == null) {
-            defaultSettings = new DbSettings(new HashMap<String, String>());
-        }
-        return defaultSettings;
     }
 
 }

@@ -1,19 +1,19 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.index;
 
-import java.util.HashSet;
+import java.util.ArrayList;
 import org.h2.api.ErrorCode;
+import org.h2.command.dml.AllColumnsForPlan;
 import org.h2.engine.Constants;
 import org.h2.engine.DbObject;
-import org.h2.engine.Mode;
 import org.h2.engine.Session;
 import org.h2.message.DbException;
 import org.h2.message.Trace;
-import org.h2.result.Row;
+import org.h2.result.RowFactory;
 import org.h2.result.SearchRow;
 import org.h2.result.SortOrder;
 import org.h2.schema.SchemaObjectBase;
@@ -21,9 +21,8 @@ import org.h2.table.Column;
 import org.h2.table.IndexColumn;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
-import org.h2.util.MathUtils;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
+import org.h2.value.DataType;
 import org.h2.value.Value;
 import org.h2.value.ValueNull;
 
@@ -35,9 +34,9 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     protected IndexColumn[] indexColumns;
     protected Column[] columns;
     protected int[] columnIds;
-    protected Table table;
-    protected IndexType indexType;
-    protected boolean isMultiVersion;
+    protected final Table table;
+    protected final IndexType indexType;
+    private final RowFactory rowFactory;
 
     /**
      * Initialize the base index.
@@ -49,9 +48,9 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      *            not yet known
      * @param newIndexType the index type
      */
-    protected void initBaseIndex(Table newTable, int id, String name,
+    protected BaseIndex(Table newTable, int id, String name,
             IndexColumn[] newIndexColumns, IndexType newIndexType) {
-        initSchemaObjectBase(newTable.getSchema(), id, name, Trace.INDEX);
+        super(newTable.getSchema(), id, name, Trace.INDEX);
         this.indexType = newIndexType;
         this.table = newTable;
         if (newIndexColumns != null) {
@@ -65,6 +64,15 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
                 columnIds[i] = col.getColumnId();
             }
         }
+        rowFactory = database.getRowFactory().createRowFactory(
+                database, database.getCompareMode(), database.getMode(),
+                database, table.getColumns(),
+                newIndexType.isScan() ? null : newIndexColumns);
+    }
+
+    @Override
+    public RowFactory getRowFactory() {
+        return rowFactory;
     }
 
     /**
@@ -74,17 +82,11 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      */
     protected static void checkIndexColumnTypes(IndexColumn[] columns) {
         for (IndexColumn c : columns) {
-            int type = c.column.getType();
-            if (type == Value.CLOB || type == Value.BLOB) {
+            if (!DataType.isIndexable(c.column.getType())) {
                 throw DbException.getUnsupportedException(
-                        "Index on BLOB or CLOB column: " + c.column.getCreateSQL());
+                        "Index on column: " + c.column.getCreateSQL());
             }
         }
-    }
-
-    @Override
-    public String getDropSQL() {
-        return null;
     }
 
     /**
@@ -94,20 +96,34 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      * @param key the key values
      * @return the exception
      */
-    protected DbException getDuplicateKeyException(String key) {
-        String sql = getName() + " ON " + table.getSQL() +
-                "(" + getColumnListSQL() + ")";
+    public DbException getDuplicateKeyException(String key) {
+        StringBuilder builder = new StringBuilder();
+        getSQL(builder, false).append(" ON ");
+        table.getSQL(builder, false).append('(');
+        builder.append(getColumnListSQL(false));
+        builder.append(')');
         if (key != null) {
-            sql += " VALUES " + key;
+            builder.append(" VALUES ").append(key);
         }
-        DbException e = DbException.get(ErrorCode.DUPLICATE_KEY_1, sql);
+        DbException e = DbException.get(ErrorCode.DUPLICATE_KEY_1, builder.toString());
         e.setSource(this);
         return e;
     }
 
-    @Override
-    public String getPlanSQL() {
-        return getSQL();
+    /**
+     * Get "PRIMARY KEY ON <table> [(column)]".
+     *
+     * @param mainIndexColumn the column index
+     * @return the message
+     */
+    protected StringBuilder getDuplicatePrimaryKeyMessage(int mainIndexColumn) {
+        StringBuilder builder = new StringBuilder("PRIMARY KEY ON ");
+        table.getSQL(builder, false);
+        if (mainIndexColumn >= 0 && mainIndexColumn < indexColumns.length) {
+            builder.append('(');
+            indexColumns[mainIndexColumn].getSQL(builder, false).append(')');
+        }
+        return builder;
     }
 
     @Override
@@ -115,33 +131,6 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         table.removeIndex(this);
         remove(session);
         database.removeMeta(session, getId());
-    }
-
-    @Override
-    public boolean canFindNext() {
-        return false;
-    }
-
-
-    @Override
-    public Cursor find(TableFilter filter, SearchRow first, SearchRow last) {
-        return find(filter.getSession(), first, last);
-    }
-
-    /**
-     * Find a row or a list of rows that is larger and create a cursor to
-     * iterate over the result. The base implementation doesn't support this
-     * feature.
-     *
-     * @param session the session
-     * @param higherThan the lower limit (excluding)
-     * @param last the last row, or null for no limit
-     * @return the cursor
-     * @throws DbException always
-     */
-    @Override
-    public Cursor findNext(Session session, SearchRow higherThan, SearchRow last) {
-        throw DbException.throwInternalError(toString());
     }
 
     /**
@@ -219,17 +208,19 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
 //=======
     protected final long getCostRangeIndex(int[] masks, long rowCount,
             TableFilter[] filters, int filter, SortOrder sortOrder,
-            boolean isScanIndex, HashSet<Column> allColumnsSet) {
+            boolean isScanIndex, AllColumnsForPlan allColumnsSet) {
         rowCount += Constants.COST_ROW_OFFSET;
         int totalSelectivity = 0;
         long rowsCost = rowCount;
         if (masks != null) {
-            for (int i = 0, len = columns.length; i < len; i++) {
-                Column column = columns[i];
+            int i = 0, len = columns.length;
+            boolean tryAdditional = false;
+            while (i < len) {
+                Column column = columns[i++];
                 int index = column.getColumnId();
                 int mask = masks[index];
                 if ((mask & IndexCondition.EQUALITY) == IndexCondition.EQUALITY) {
-                    if (i == columns.length - 1 && getIndexType().isUnique()) {
+                    if (i == len && getIndexType().isUnique()) {
                         rowsCost = 3;
                         break;
                     }
@@ -241,18 +232,34 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
                     }
                     rowsCost = 2 + Math.max(rowCount / distinctRows, 1);
                 } else if ((mask & IndexCondition.RANGE) == IndexCondition.RANGE) {
-                    rowsCost = 2 + rowCount / 4;
+                    rowsCost = 2 + rowsCost / 4;
+                    tryAdditional = true;
                     break;
                 } else if ((mask & IndexCondition.START) == IndexCondition.START) {
-                    rowsCost = 2 + rowCount / 3;
+                    rowsCost = 2 + rowsCost / 3;
+                    tryAdditional = true;
                     break;
                 } else if ((mask & IndexCondition.END) == IndexCondition.END) {
-                    rowsCost = rowCount / 3;
+                    rowsCost = rowsCost / 3;
+                    tryAdditional = true;
                     break;
                 } else {
+                    if (mask == 0) {
+                        // Adjust counter of used columns (i)
+                        i--;
+                    }
                     break;
                 }
             }
+            // Some additional columns can still be used
+            if (tryAdditional) {
+                while (i < len && masks[columns[i].getColumnId()] != 0) {
+                    i++;
+                    rowsCost--;
+                }
+            }
+            // Increase cost of indexes with additional unused columns
+            rowsCost += len - i;
         }
         // If the ORDER BY clause matches the ordering of this index,
         // it will be cheaper than another index, so adjust the cost
@@ -302,10 +309,12 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         // satisfy the query without needing to read from the primary table
         // (scan index), make that one slightly lower cost.
         boolean needsToReadFromScanIndex = true;
-        if (!isScanIndex && allColumnsSet != null && !allColumnsSet.isEmpty()) {
+        if (!isScanIndex && allColumnsSet != null) {
             boolean foundAllColumnsWeNeed = true;
-            for (Column c : allColumnsSet) {
-                if (c.getTable() == getTable()) {
+            ArrayList<Column> foundCols = allColumnsSet.get(getTable());
+            if (foundCols != null)
+            {
+                for (Column c : foundCols) {
                     boolean found = false;
                     for (Column c2 : columns) {
                         if (c == c2) {
@@ -363,61 +372,78 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     }
 
     /**
-     * Check if one of the columns is NULL and multiple rows with NULL are
-     * allowed using the current compatibility mode for unique indexes. Note:
-     * NULL behavior is complicated in SQL.
+     * Check if this row may have duplicates with the same indexed values in the
+     * current compatibility mode. Duplicates with {@code NULL} values are
+     * allowed in some modes.
      *
-     * @param newRow the row to check
-     * @return true if one of the columns is null and multiple nulls in unique
-     *         indexes are allowed
+     * @param searchRow
+     *            the row to check
+     * @return {@code true} if specified row may have duplicates,
+     *         {@code false otherwise}
      */
-    protected boolean containsNullAndAllowMultipleNull(SearchRow newRow) {
-        Mode mode = database.getMode();
-        //1. 对于唯一索引，必须完全唯一，适用于Derby/HSQLDB/MSSQLServer
-        if (mode.uniqueIndexSingleNull) {
-        	//不允许出现:
-        	//(x, null)
-        	//(x, null)
-        	//也不允许出现:
-        	//(null, null)
-        	//(null, null)
-            return false;
-        } else if (mode.uniqueIndexSingleNullExceptAllColumnsAreNull) {
-        	//2. 对于唯一索引，索引记录可以全为null，适用于Oracle
-        	
-        	//不允许出现:
-        	//(x, null)
-        	//(x, null)
-        	//但是允许出现:
-        	//(null, null)
-        	//(null, null)
+//<<<<<<< HEAD
+//    protected boolean containsNullAndAllowMultipleNull(SearchRow newRow) {
+//        Mode mode = database.getMode();
+//        //1. 对于唯一索引，必须完全唯一，适用于Derby/HSQLDB/MSSQLServer
+//        if (mode.uniqueIndexSingleNull) {
+//        	//不允许出现:
+//        	//(x, null)
+//        	//(x, null)
+//        	//也不允许出现:
+//        	//(null, null)
+//        	//(null, null)
+//            return false;
+//        } else if (mode.uniqueIndexSingleNullExceptAllColumnsAreNull) {
+//        	//2. 对于唯一索引，索引记录可以全为null，适用于Oracle
+//        	
+//        	//不允许出现:
+//        	//(x, null)
+//        	//(x, null)
+//        	//但是允许出现:
+//        	//(null, null)
+//        	//(null, null)
+//=======
+    public boolean mayHaveNullDuplicates(SearchRow searchRow) {
+        switch (database.getMode().uniqueIndexNullsHandling) {
+        case ALLOW_DUPLICATES_WITH_ANY_NULL:
             for (int index : columnIds) {
-                Value v = newRow.getValue(index);
-                if (v != ValueNull.INSTANCE) {
+                if (searchRow.getValue(index) == ValueNull.INSTANCE) {
+                    return true;
+                }
+            }
+            return false;
+        case ALLOW_DUPLICATES_WITH_ALL_NULLS:
+            for (int index : columnIds) {
+                if (searchRow.getValue(index) != ValueNull.INSTANCE) {
                     return false;
                 }
             }
             return true;
+        default:
+            return false;
         }
-        //3. 对于唯一索引，只要一个为null，就是合法的，适用于REGULAR(即H2)/DB2/MySQL/PostgreSQL
-        
-        //即允许出现:
-    	//(x, null)
-    	//(x, null)
-    	//也允许出现:
-    	//(null, null)
-    	//(null, null)
-        
-        //也就是说，只要相同的两条索引记录包含null即可
-        for (int index : columnIds) {
-            Value v = newRow.getValue(index);
-            if (v == ValueNull.INSTANCE) {
-                return true;
-            }
-        }
-        
-        //4. 对于唯一索引，没有null时是不允许出现两条相同的索引记录的
-        return false;
+//<<<<<<< HEAD
+//        //3. 对于唯一索引，只要一个为null，就是合法的，适用于REGULAR(即H2)/DB2/MySQL/PostgreSQL
+//        
+//        //即允许出现:
+//    	//(x, null)
+//    	//(x, null)
+//    	//也允许出现:
+//    	//(null, null)
+//    	//(null, null)
+//        
+//        //也就是说，只要相同的两条索引记录包含null即可
+//        for (int index : columnIds) {
+//            Value v = newRow.getValue(index);
+//            if (v == ValueNull.INSTANCE) {
+//                return true;
+//            }
+//        }
+//        
+//        //4. 对于唯一索引，没有null时是不允许出现两条相同的索引记录的
+//        return false;
+//=======
+//>>>>>>> d9a7cf0dcb563abb69ed313f35cdebfebe544674
     }
 
     /**
@@ -428,15 +454,10 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
      * @return 0 if both rows are equal, -1 if the first row is smaller,
      *         otherwise 1
      */
-    int compareKeys(SearchRow rowData, SearchRow compare) {
+    public int compareKeys(SearchRow rowData, SearchRow compare) {
         long k1 = rowData.getKey();
         long k2 = compare.getKey();
         if (k1 == k2) {
-            if (isMultiVersion) {
-                int v1 = rowData.getVersion();
-                int v2 = compare.getVersion();
-                return MathUtils.compareInt(v2, v1);
-            }
             return 0;
         }
         return k1 > k2 ? 1 : -1;
@@ -446,8 +467,12 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
         if (a == b) {
             return 0;
         }
-
-        int comp = table.compareTypeSafe(a, b);
+        boolean aNull = a == ValueNull.INSTANCE;
+        boolean bNull = b == ValueNull.INSTANCE;
+        if (aNull || bNull) {
+            return SortOrder.compareNull(aNull, sortType);
+        }
+        int comp = table.compareValues(database, a, b);
         if ((sortType & SortOrder.DESCENDING) != 0) { //降序时，把比较结果反过来
             comp = -comp;
         }
@@ -472,15 +497,11 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     /**
      * Get the list of columns as a string.
      *
+     * @param alwaysQuote quote all identifiers
      * @return the list of columns
      */
-    private String getColumnListSQL() {
-        StatementBuilder buff = new StatementBuilder();
-        for (IndexColumn c : indexColumns) {
-            buff.appendExceptFirst(", ");
-            buff.append(c.getSQL());
-        }
-        return buff.toString();
+    private String getColumnListSQL(boolean alwaysQuote) {
+        return IndexColumn.writeColumns(new StringBuilder(), indexColumns, alwaysQuote).toString();
     }
 
     @Override
@@ -492,17 +513,19 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
             buff.append("IF NOT EXISTS ");
         }
         buff.append(quotedName);
-        buff.append(" ON ").append(targetTable.getSQL());
+        buff.append(" ON ");
+        targetTable.getSQL(buff, true);
         if (comment != null) {
-            buff.append(" COMMENT ").append(StringUtils.quoteStringSQL(comment));
+            buff.append(" COMMENT ");
+            StringUtils.quoteStringSQL(buff, comment);
         }
-        buff.append('(').append(getColumnListSQL()).append(')');
+        buff.append('(').append(getColumnListSQL(true)).append(')');
         return buff.toString();
     }
 
     @Override
     public String getCreateSQL() {
-        return getCreateSQLForCopy(table, getSQL());
+        return getCreateSQLForCopy(table, getSQL(true));
     }
 
     @Override
@@ -531,42 +554,7 @@ public abstract class BaseIndex extends SchemaObjectBase implements Index {
     }
 
     @Override
-    public void commit(int operation, Row row) {
-        // nothing to do
-    }
-
-    void setMultiVersion(boolean multiVersion) {
-        this.isMultiVersion = multiVersion;
-    }
-
-    @Override
-    public Row getRow(Session session, long key) {
-        throw DbException.getUnsupportedException(toString());
-    }
-
-    @Override
     public boolean isHidden() {
         return table.isHidden();
-    }
-
-    @Override
-    public boolean isRowIdIndex() { //只有org.h2.mvstore.db.MVPrimaryIndex和org.h2.index.PageDataIndex返回true
-        return false;
-    }
-
-    @Override
-    public boolean canScan() {
-        return true;
-    }
-
-    @Override
-    public void setSortedInsertMode(boolean sortedInsertMode) { //只有org.h2.index.PageIndex覆盖
-        // ignore
-    }
-
-    @Override
-    public IndexLookupBatch createLookupBatch(TableFilter[] filters, int filter) {
-        // Lookup batching is not supported.
-        return null;
     }
 }

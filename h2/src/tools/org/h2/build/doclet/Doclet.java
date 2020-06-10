@@ -1,20 +1,18 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.build.doclet;
 
-import java.io.BufferedWriter;
-import java.io.File;
-import java.io.FileWriter;
 import java.io.IOException;
 import java.io.PrintWriter;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.HashSet;
-import org.h2.util.StatementBuilder;
 import org.h2.util.StringUtils;
 import com.sun.javadoc.ClassDoc;
 import com.sun.javadoc.ConstructorDoc;
@@ -40,7 +38,7 @@ public class Doclet {
     private String destDir = System.getProperty("h2.javadocDestDir",
             "docs/javadoc");
     private int errorCount;
-    private final HashSet<String> errors = new HashSet<String>();
+    private final HashSet<String> errors = new HashSet<>();
 
     /**
      * This method is called by the javadoc framework and is required for all
@@ -81,11 +79,10 @@ public class Doclet {
     private void processClass(ClassDoc clazz) throws IOException {
         String packageName = clazz.containingPackage().name();
         String dir = destDir + "/" + packageName.replace('.', '/');
-        (new File(dir)).mkdirs();
+        Files.createDirectories(Paths.get(dir));
         String fileName = dir + "/" + clazz.name() + ".html";
         String className = getClass(clazz);
-        FileWriter out = new FileWriter(fileName);
-        PrintWriter writer = new PrintWriter(new BufferedWriter(out));
+        PrintWriter writer = new PrintWriter(Files.newBufferedWriter(Paths.get(fileName)));
         writer.println("<!DOCTYPE html PUBLIC \"-//W3C//DTD " +
                 "XHTML 1.0 Strict//EN\" " +
                 "\"http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd\">");
@@ -119,28 +116,14 @@ public class Doclet {
                 constructors.length);
         System.arraycopy(methods, 0, constructorsMethods, constructors.length,
                 methods.length);
-        Arrays.sort(constructorsMethods, new Comparator<ExecutableMemberDoc>() {
-            @Override
-            public int compare(ExecutableMemberDoc a, ExecutableMemberDoc b) {
-                // sort static method before non-static methods
-                if (a.isStatic() != b.isStatic()) {
-                    return a.isStatic() ? -1 : 1;
-                }
-                return a.name().compareTo(b.name());
+        Arrays.sort(constructorsMethods, (a, b) -> {
+            // sort static method before non-static methods
+            if (a.isStatic() != b.isStatic()) {
+                return a.isStatic() ? -1 : 1;
             }
+            return a.name().compareTo(b.name());
         });
-//
-//
-//        Arrays.sort(methods, new Comparator<MethodDoc>() {
-//            public int compare(MethodDoc a, MethodDoc b) {
-//                // sort static method before non-static methods
-//                if (a.isStatic() != b.isStatic()) {
-//                    return a.isStatic() ? -1 : 1;
-//                }
-//                return a.name().compareTo(b.name());
-//            }
-//        });
-        ArrayList<String> signatures = new ArrayList<String>();
+        ArrayList<String> signatures = new ArrayList<>();
         boolean hasMethods = false;
         int id = 0;
         for (int i = 0; i < constructorsMethods.length; i++) {
@@ -213,12 +196,7 @@ public class Doclet {
         if (clazz.interfaces().length > 0) {
             fields = clazz.interfaces()[0].fields();
         }
-        Arrays.sort(fields, new Comparator<FieldDoc>() {
-            @Override
-            public int compare(FieldDoc a, FieldDoc b) {
-                return a.name().compareTo(b.name());
-            }
-        });
+        Arrays.sort(fields, Comparator.comparing(FieldDoc::name));
         int fieldId = 0;
         for (FieldDoc field : fields) {
             if (skipField(clazz, field)) {
@@ -257,19 +235,16 @@ public class Doclet {
         }
 
         // field details
-        Arrays.sort(fields, new Comparator<FieldDoc>() {
-            @Override
-            public int compare(FieldDoc a, FieldDoc b) {
-                String ca = a.constantValueExpression();
-                if (ca == null) {
-                    ca = a.name();
-                }
-                String cb = b.constantValueExpression();
-                if (cb == null) {
-                    cb = b.name();
-                }
-                return ca.compareTo(cb);
+        Arrays.sort(fields, (a, b) -> {
+            String ca = a.constantValueExpression();
+            if (ca == null) {
+                ca = a.name();
             }
+            String cb = b.constantValueExpression();
+            if (cb == null) {
+                cb = b.name();
+            }
+            return ca.compareTo(cb);
         });
         for (FieldDoc field : fields) {
             writeFieldDetails(writer, clazz, field);
@@ -277,7 +252,6 @@ public class Doclet {
 
         writer.println("</div></td></tr></table></body></html>");
         writer.close();
-        out.close();
     }
 
     private void writeFieldDetails(PrintWriter writer, ClassDoc clazz,
@@ -311,31 +285,34 @@ public class Doclet {
             return;
         }
         Parameter[] params = method.parameters();
-        StatementBuilder buff = new StatementBuilder();
-        buff.append('(');
-        int i = 0;
-        for (Parameter p : params) {
-            boolean isVarArgs = method.isVarArgs() && i++ == params.length - 1;
-            buff.appendExceptFirst(", ");
-            buff.append(getTypeName(false, isVarArgs, p.type()));
-            buff.append(' ');
-            buff.append(p.name());
+        StringBuilder builder = new StringBuilder();
+        builder.append('(');
+        for (int i = 0, l = params.length; i < l; i++) {
+            if (i > 0) {
+                builder.append(", ");
+            }
+            boolean isVarArgs = method.isVarArgs() && i == params.length - 1;
+            Parameter p = params[i];
+            builder.append(getTypeName(false, isVarArgs, p.type()));
+            builder.append(' ');
+            builder.append(p.name());
         }
-        buff.append(')');
+        builder.append(')');
         ClassDoc[] exceptions = method.thrownExceptions();
         if (exceptions.length > 0) {
-            buff.append(" throws ");
-            buff.resetCount();
-            for (ClassDoc ex : exceptions) {
-                buff.appendExceptFirst(", ");
-                buff.append(ex.typeName());
+            builder.append(" throws ");
+            for (int i = 0, l = exceptions.length; i < l; i++) {
+                if (i > 0) {
+                    builder.append(", ");
+                }
+                builder.append(exceptions[i].typeName());
             }
         }
         if (isDeprecated(method)) {
             name = "<span class=\"deprecated\">" + name + "</span>";
         }
         writer.println("<a id=\"" + signature + "\" href=\"#" + signature + "\">" +
-                name + "</a>" + buff.toString());
+                name + "</a>" + builder.toString());
         boolean hasComment = method.commentText() != null &&
                 method.commentText().trim().length() != 0;
         writer.println("<div class=\"methodText\">" +

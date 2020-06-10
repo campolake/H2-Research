@@ -1,13 +1,11 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.dev.util;
 
 import java.util.Iterator;
-
-import org.h2.mvstore.DataUtils;
 
 /**
  * A very simple linked list that supports concurrent access.
@@ -52,7 +50,7 @@ public class ConcurrentLinkedListWithTail<K> {
      * @param obj the element
      */
     public void add(K obj) {
-        Entry<K> x = new Entry<K>(obj);
+        Entry<K> x = new Entry<>(obj);
         Entry<K> t = tail;
         if (t != null) {
             t.next = x;
@@ -130,11 +128,6 @@ public class ConcurrentLinkedListWithTail<K> {
                 K x = current.obj;
                 current = current.next;
                 return x;
-            }
-
-            @Override
-            public void remove() {
-                throw DataUtils.newUnsupportedOperationException("remove");
             }
 
         };

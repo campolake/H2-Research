@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.jdbc;
@@ -14,8 +14,13 @@ import java.util.Map;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.message.TraceObject;
-import org.h2.tools.SimpleResultSet;
+import org.h2.result.SimpleResult;
+import org.h2.value.DataType;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
+import org.h2.value.ValueArray;
+import org.h2.value.ValueLong;
+import org.h2.value.ValueNull;
 
 /**
  * Represents an ARRAY value.
@@ -31,7 +36,7 @@ public class JdbcArray extends TraceObject implements Array {
     public JdbcArray(JdbcConnection conn, Value value, int id) {
         setTrace(conn.getSession().getTrace(), TraceObject.ARRAY, id);
         this.conn = conn;
-        this.value = value;
+        this.value = value.convertTo(Value.ARRAY);
     }
 
     /**
@@ -120,17 +125,17 @@ public class JdbcArray extends TraceObject implements Array {
     }
 
     /**
-     * Returns the base type of the array. This database does support mixed type
-     * arrays and therefore there is no base type.
+     * Returns the base type of the array.
      *
-     * @return Types.NULL
+     * @return the base type or Types.NULL
      */
     @Override
     public int getBaseType() throws SQLException {
         try {
             debugCodeCall("getBaseType");
             checkClosed();
-            return Types.NULL;
+            return value == ValueNull.INSTANCE ? Types.NULL
+                    : DataType.convertTypeToSQLType(((ValueArray) value).getComponentType().getValueType());
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -140,14 +145,15 @@ public class JdbcArray extends TraceObject implements Array {
      * Returns the base type name of the array. This database does support mixed
      * type arrays and therefore there is no base type.
      *
-     * @return "NULL"
+     * @return the base type name or "NULL"
      */
     @Override
     public String getBaseTypeName() throws SQLException {
         try {
             debugCodeCall("getBaseTypeName");
             checkClosed();
-            return "NULL";
+            return value == ValueNull.INSTANCE ? "NULL"
+                    : DataType.getDataType(((ValueArray) value).getComponentType().getValueType()).name;
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -165,7 +171,7 @@ public class JdbcArray extends TraceObject implements Array {
         try {
             debugCodeCall("getResultSet");
             checkClosed();
-            return getResultSet(get(), 0);
+            return getResultSetImpl(1L, Integer.MAX_VALUE);
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -186,7 +192,7 @@ public class JdbcArray extends TraceObject implements Array {
             }
             checkClosed();
             JdbcConnection.checkMap(map);
-            return getResultSet(get(), 0);
+            return getResultSetImpl(1L, Integer.MAX_VALUE);
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -209,7 +215,7 @@ public class JdbcArray extends TraceObject implements Array {
                 debugCode("getResultSet("+index+", " + count+");");
             }
             checkClosed();
-            return getResultSet(get(index, count), index - 1);
+            return getResultSetImpl(index, count);
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -236,7 +242,7 @@ public class JdbcArray extends TraceObject implements Array {
             }
             checkClosed();
             JdbcConnection.checkMap(map);
-            return getResultSet(get(index, count), index - 1);
+            return getResultSetImpl(index, count);
         } catch (Exception e) {
             throw logAndConvert(e);
         }
@@ -251,15 +257,25 @@ public class JdbcArray extends TraceObject implements Array {
         value = null;
     }
 
-    private static ResultSet getResultSet(Object[] array, long offset) {
-        SimpleResultSet rs = new SimpleResultSet();
-        rs.addColumn("INDEX", Types.BIGINT, 0, 0);
-        // TODO array result set: there are multiple data types possible
-        rs.addColumn("VALUE", Types.NULL, 0, 0);
-        for (int i = 0; i < array.length; i++) {
-            rs.addRow(Long.valueOf(offset + i + 1), array[i]);
+    private ResultSet getResultSetImpl(long index, int count) {
+        int id = getNextId(TraceObject.RESULT_SET);
+        SimpleResult rs = new SimpleResult();
+        ValueArray array;
+        if (value != ValueNull.INSTANCE) {
+            array = (ValueArray) value;
+        } else {
+            array = null;
         }
-        return rs;
+        rs.addColumn("INDEX", "INDEX", TypeInfo.TYPE_BIGINT);
+        rs.addColumn("VALUE", "VALUE", array != null ? array.getComponentType() : TypeInfo.TYPE_NULL);
+        if (array != null) {
+            Value[] values = array.getList();
+            count = checkRange(index, count, values.length);
+            for (int i = (int) index; i < index + count; i++) {
+                rs.addRow(ValueLong.get(i), values[i - 1]);
+            }
+        }
+        return new JdbcResultSet(conn, null, null, rs, id, false, true, false);
     }
 
     private void checkClosed() {
@@ -270,22 +286,31 @@ public class JdbcArray extends TraceObject implements Array {
     }
 
     private Object[] get() {
-        return (Object[]) value.convertTo(Value.ARRAY).getObject();
+        return (Object[]) conn.convertToDefaultObject(value);
     }
 
     private Object[] get(long index, int count) {
-        Object[] array = get();
-        if (count < 0 || count > array.length) {
-            throw DbException.getInvalidValueException("count (1.."
-                    + array.length + ")", count);
+        if (value == ValueNull.INSTANCE) {
+            return null;
         }
-        if (index < 1 || index > array.length) {
-            throw DbException.getInvalidValueException("index (1.."
-                    + array.length + ")", index);
+        Value[] values = ((ValueArray) value).getList();
+        count = checkRange(index, count, values.length);
+        Object[] a = new Object[count];
+        for (int i = 0, j = (int) index - 1; i < count; i++, j++) {
+            a[i] = values[j].getObject();
         }
-        Object[] subset = new Object[count];
-        System.arraycopy(array, (int) (index - 1), subset, 0, count);
-        return subset;
+        return a;
+    }
+
+    private static int checkRange(long index, int count, int len) {
+        if (index < 1 || index > len) {
+            throw DbException.getInvalidValueException("index (1.." + len + ')', index);
+        }
+        int rem = len - (int) index + 1;
+        if (count < 0) {
+            throw DbException.getInvalidValueException("count (0.." + rem + ')', count);
+        }
+        return Math.min(rem, count);
     }
 
     /**

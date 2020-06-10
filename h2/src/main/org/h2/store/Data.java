@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  *
  * The variable size number format code is a port from SQLite,
@@ -13,41 +13,50 @@ import java.io.OutputStream;
 import java.io.Reader;
 import java.math.BigDecimal;
 import java.math.BigInteger;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
-import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.util.Arrays;
+import java.util.Calendar;
+import java.util.GregorianCalendar;
+
 import org.h2.api.ErrorCode;
+import org.h2.api.IntervalQualifier;
 import org.h2.engine.Constants;
-import org.h2.engine.SysProperties;
 import org.h2.message.DbException;
-import org.h2.mvstore.DataUtils;
-import org.h2.tools.SimpleResultSet;
+import org.h2.result.ResultInterface;
+import org.h2.result.SimpleResult;
+import org.h2.util.Bits;
 import org.h2.util.DateTimeUtils;
+import org.h2.util.LegacyDateTimeUtils;
 import org.h2.util.MathUtils;
-import org.h2.value.DataType;
+import org.h2.util.Utils;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 import org.h2.value.ValueArray;
 import org.h2.value.ValueBoolean;
 import org.h2.value.ValueByte;
 import org.h2.value.ValueBytes;
+import org.h2.value.ValueCollectionBase;
 import org.h2.value.ValueDate;
 import org.h2.value.ValueDecimal;
 import org.h2.value.ValueDouble;
 import org.h2.value.ValueFloat;
 import org.h2.value.ValueGeometry;
 import org.h2.value.ValueInt;
+import org.h2.value.ValueInterval;
 import org.h2.value.ValueJavaObject;
+import org.h2.value.ValueJson;
 import org.h2.value.ValueLob;
 import org.h2.value.ValueLobDb;
 import org.h2.value.ValueLong;
 import org.h2.value.ValueNull;
 import org.h2.value.ValueResultSet;
+import org.h2.value.ValueRow;
 import org.h2.value.ValueShort;
 import org.h2.value.ValueString;
 import org.h2.value.ValueStringFixed;
 import org.h2.value.ValueStringIgnoreCase;
 import org.h2.value.ValueTime;
+import org.h2.value.ValueTimeTimeZone;
 import org.h2.value.ValueTimestamp;
 import org.h2.value.ValueTimestampTimeZone;
 import org.h2.value.ValueUuid;
@@ -69,35 +78,65 @@ public class Data {
     /**
      * The length of a long value.
      */
-    private static final int LENGTH_LONG = 8;
+    public static final int LENGTH_LONG = 8;
 
-    private static final int INT_0_15 = 32;
-    private static final int LONG_0_7 = 48;
-    private static final int DECIMAL_0_1 = 56;
-    private static final int DECIMAL_SMALL_0 = 58;
-    private static final int DECIMAL_SMALL = 59;
-    private static final int DOUBLE_0_1 = 60;
-    private static final int FLOAT_0_1 = 62;
-    private static final int BOOLEAN_FALSE = 64;
-    private static final int BOOLEAN_TRUE = 65;
-    private static final int INT_NEG = 66;
-    private static final int LONG_NEG = 67;
-    private static final int STRING_0_31 = 68;
+    private static final byte NULL = 0;
+    private static final byte BYTE = 2;
+    private static final byte SHORT = 3;
+    private static final byte INT = 4;
+    private static final byte LONG = 5;
+    private static final byte DECIMAL = 6;
+    private static final byte DOUBLE = 7;
+    private static final byte FLOAT = 8;
+    private static final byte TIME = 9;
+    private static final byte DATE = 10;
+    private static final byte TIMESTAMP = 11;
+    private static final byte BYTES = 12;
+    private static final byte STRING = 13;
+    private static final byte STRING_IGNORECASE = 14;
+    private static final byte BLOB = 15;
+    private static final byte CLOB = 16;
+    private static final byte ARRAY = 17;
+    private static final byte RESULT_SET = 18;
+    private static final byte JAVA_OBJECT = 19;
+    private static final byte UUID = 20;
+    private static final byte STRING_FIXED = 21;
+    private static final byte GEOMETRY = 22;
+    private static final byte TIMESTAMP_TZ = 24;
+    private static final byte ENUM = 25;
+    private static final byte INTERVAL = 26;
+    private static final byte ROW = 27;
+    private static final byte INT_0_15 = 32;
+    private static final byte LONG_0_7 = 48;
+    private static final byte DECIMAL_0_1 = 56;
+    private static final byte DECIMAL_SMALL_0 = 58;
+    private static final byte DECIMAL_SMALL = 59;
+    private static final byte DOUBLE_0_1 = 60;
+    private static final byte FLOAT_0_1 = 62;
+    private static final byte BOOLEAN_FALSE = 64;
+    private static final byte BOOLEAN_TRUE = 65;
+    private static final byte INT_NEG = 66;
+    private static final byte LONG_NEG = 67;
+    private static final byte STRING_0_31 = 68;
     private static final int BYTES_0_31 = 100;
     private static final int LOCAL_TIME = 132;
     private static final int LOCAL_DATE = 133;
     private static final int LOCAL_TIMESTAMP = 134;
+    // 135 was used for CUSTOM_DATA_TYPE
+    private static final int JSON = 136;
+    private static final int TIMESTAMP_TZ_2 = 137;
+    private static final int TIME_TZ = 138;
 
     private static final long MILLIS_PER_MINUTE = 1000 * 60;
 
     /**
-     * Can not store the local time, because doing so with old database files
-     * that didn't do it could result in an ArrayIndexOutOfBoundsException. The
-     * reason is that adding a row to a page only allocated space for the new
-     * row, but didn't take into account that existing rows now can use more
-     * space, due to the changed format.
+     * Raw offset doesn't change during DST transitions, but changes during
+     * other transitions that some time zones have. H2 1.4.193 and later
+     * versions use zone offset that is valid for startup time for performance
+     * reasons. Datetime storage code of PageStore has issues with all time zone
+     * transitions, so this buggy logic is preserved as is too.
      */
-    private static final boolean STORE_LOCAL_TIME = false;
+    private static int zoneOffsetMillis = new GregorianCalendar().get(Calendar.ZONE_OFFSET);
 
     /**
      * The data itself.
@@ -114,9 +153,12 @@ public class Data {
      */
     private final DataHandler handler;
 
-    private Data(DataHandler handler, byte[] data) {
+    private final boolean storeLocalTime;
+
+    private Data(DataHandler handler, byte[] data, boolean storeLocalTime) {
         this.handler = handler;
         this.data = data;
+        this.storeLocalTime = storeLocalTime;
     }
 
     /**
@@ -127,11 +169,7 @@ public class Data {
      * @param x the value
      */
     public void setInt(int pos, int x) {
-        byte[] buff = data;
-        buff[pos] = (byte) (x >> 24);
-        buff[pos + 1] = (byte) (x >> 16);
-        buff[pos + 2] = (byte) (x >> 8);
-        buff[pos + 3] = (byte) x;
+        Bits.writeInt(data, pos, x);
     }
 
     /**
@@ -141,11 +179,7 @@ public class Data {
      * @param x the value
      */
     public void writeInt(int x) {
-        byte[] buff = data;
-        buff[pos] = (byte) (x >> 24);
-        buff[pos + 1] = (byte) (x >> 16);
-        buff[pos + 2] = (byte) (x >> 8);
-        buff[pos + 3] = (byte) x;
+        Bits.writeInt(data, pos, x);
         pos += 4;
     }
 
@@ -156,11 +190,7 @@ public class Data {
      * @return the value
      */
     public int readInt() {
-        byte[] buff = data;
-        int x = (buff[pos] << 24) +
-                ((buff[pos+1] & 0xff) << 16) +
-                ((buff[pos+2] & 0xff) << 8) +
-                (buff[pos+3] & 0xff);
+        int x = Bits.readInt(data, pos);
         pos += 4;
         return x;
     }
@@ -307,10 +337,13 @@ public class Data {
      *
      * @param handler the data handler
      * @param capacity the initial capacity of the buffer
+     * @param storeLocalTime
+     *            store DATE, TIME, and TIMESTAMP values with local time storage
+     *            format
      * @return the buffer
      */
-    public static Data create(DataHandler handler, int capacity) {
-        return new Data(handler, new byte[capacity]);
+    public static Data create(DataHandler handler, int capacity, boolean storeLocalTime) {
+        return new Data(handler, new byte[capacity], storeLocalTime);
     }
 
     /**
@@ -319,10 +352,13 @@ public class Data {
      *
      * @param handler the data handler
      * @param buff the data
+     * @param storeLocalTime
+     *            store DATE, TIME, and TIMESTAMP values with local time storage
+     *            format
      * @return the buffer
      */
-    public static Data create(DataHandler handler, byte[] buff) {
-        return new Data(handler, buff);
+    public static Data create(DataHandler handler, byte[] buff, boolean storeLocalTime) {
+        return new Data(handler, buff, storeLocalTime);
     }
 
     /**
@@ -400,7 +436,9 @@ public class Data {
      * @return the long value
      */
     public long readLong() {
-        return ((long) (readInt()) << 32) + (readInt() & 0xffffffffL);
+        long x = Bits.readLong(data, pos);
+        pos += 8;
+        return x;
     }
 
     /**
@@ -409,8 +447,8 @@ public class Data {
      * @param x the value
      */
     public void writeLong(long x) {
-        writeInt((int) (x >>> 32));
-        writeInt((int) x);
+        Bits.writeLong(data, pos, x);
+        pos += 8;
     }
 
     /**
@@ -421,53 +459,53 @@ public class Data {
     public void writeValue(Value v) {
         int start = pos;
         if (v == ValueNull.INSTANCE) {
-            data[pos++] = 0;
+            data[pos++] = NULL;
             return;
         }
-        int type = v.getType();
+        int type = v.getValueType();
         switch (type) {
         case Value.BOOLEAN:
-            writeByte((byte) (v.getBoolean().booleanValue() ?
-                    BOOLEAN_TRUE : BOOLEAN_FALSE));
+            writeByte(v.getBoolean() ? BOOLEAN_TRUE : BOOLEAN_FALSE);
             break;
-        case Value.BYTE:
-            writeByte((byte) type);
+        case Value.TINYINT:
+            writeByte(BYTE);
             writeByte(v.getByte());
             break;
-        case Value.SHORT:
-            writeByte((byte) type);
+        case Value.SMALLINT:
+            writeByte(SHORT);
             writeShortInt(v.getShort());
             break;
+        case Value.ENUM:
         case Value.INT: {
             int x = v.getInt();
             if (x < 0) {
-                writeByte((byte) INT_NEG);
+                writeByte(INT_NEG);
                 writeVarInt(-x);
             } else if (x < 16) {
                 writeByte((byte) (INT_0_15 + x));
             } else {
-                writeByte((byte) type);
+                writeByte(type == Value.INT ? INT : ENUM);
                 writeVarInt(x);
             }
             break;
         }
-        case Value.LONG: {
+        case Value.BIGINT: {
             long x = v.getLong();
             if (x < 0) {
-                writeByte((byte) LONG_NEG);
+                writeByte(LONG_NEG);
                 writeVarLong(-x);
             } else if (x < 8) {
                 writeByte((byte) (LONG_0_7 + x));
             } else {
-                writeByte((byte) type);
+                writeByte(LONG);
                 writeVarLong(x);
             }
             break;
         }
-        case Value.DECIMAL: {
+        case Value.NUMERIC: {
             BigDecimal x = v.getBigDecimal();
             if (BigDecimal.ZERO.equals(x)) {
-                writeByte((byte) DECIMAL_0_1);
+                writeByte(DECIMAL_0_1);
             } else if (BigDecimal.ONE.equals(x)) {
                 writeByte((byte) (DECIMAL_0_1 + 1));
             } else {
@@ -476,15 +514,15 @@ public class Data {
                 int bits = b.bitLength();
                 if (bits <= 63) {
                     if (scale == 0) {
-                        writeByte((byte) DECIMAL_SMALL_0);
+                        writeByte(DECIMAL_SMALL_0);
                         writeVarLong(b.longValue());
                     } else {
-                        writeByte((byte) DECIMAL_SMALL);
+                        writeByte(DECIMAL_SMALL);
                         writeVarInt(scale);
                         writeVarLong(b.longValue());
                     }
                 } else {
-                    writeByte((byte) type);
+                    writeByte(DECIMAL);
                     writeVarInt(scale);
                     byte[] bytes = b.toByteArray();
                     writeVarInt(bytes.length);
@@ -494,103 +532,123 @@ public class Data {
             break;
         }
         case Value.TIME:
-            if (STORE_LOCAL_TIME) {
+            if (storeLocalTime) {
                 writeByte((byte) LOCAL_TIME);
                 ValueTime t = (ValueTime) v;
                 long nanos = t.getNanos();
-                long millis = nanos / 1000000;
-                nanos -= millis * 1000000;
+                long millis = nanos / 1_000_000;
+                nanos -= millis * 1_000_000;
                 writeVarLong(millis);
-                writeVarLong(nanos);
+                writeVarInt((int) nanos);
             } else {
-                writeByte((byte) type);
-                writeVarLong(DateTimeUtils.getTimeLocalWithoutDst(v.getTime()));
+                writeByte(TIME);
+                writeVarLong(LegacyDateTimeUtils.toTime(null, null, v).getTime() + zoneOffsetMillis);
             }
             break;
+        case Value.TIME_TZ: {
+            writeByte((byte) TIME_TZ);
+            ValueTimeTimeZone ts = (ValueTimeTimeZone) v;
+            long nanosOfDay = ts.getNanos();
+            writeVarInt((int) (nanosOfDay / DateTimeUtils.NANOS_PER_SECOND));
+            writeVarInt((int) (nanosOfDay % DateTimeUtils.NANOS_PER_SECOND));
+            writeTimeZone(ts.getTimeZoneOffsetSeconds());
+            break;
+        }
         case Value.DATE: {
-            if (STORE_LOCAL_TIME) {
+            if (storeLocalTime) {
                 writeByte((byte) LOCAL_DATE);
                 long x = ((ValueDate) v).getDateValue();
                 writeVarLong(x);
             } else {
-                writeByte((byte) type);
-                long x = DateTimeUtils.getTimeLocalWithoutDst(v.getDate());
+                writeByte(DATE);
+                long x = LegacyDateTimeUtils.toDate(null, null, v).getTime() + zoneOffsetMillis;
                 writeVarLong(x / MILLIS_PER_MINUTE);
             }
             break;
         }
         case Value.TIMESTAMP: {
-            if (STORE_LOCAL_TIME) {
+            if (storeLocalTime) {
                 writeByte((byte) LOCAL_TIMESTAMP);
                 ValueTimestamp ts = (ValueTimestamp) v;
                 long dateValue = ts.getDateValue();
                 writeVarLong(dateValue);
                 long nanos = ts.getTimeNanos();
-                long millis = nanos / 1000000;
-                nanos -= millis * 1000000;
+                long millis = nanos / 1_000_000;
+                nanos -= millis * 1_000_000;
                 writeVarLong(millis);
-                writeVarLong(nanos);
+                writeVarInt((int) nanos);
             } else {
-                Timestamp ts = v.getTimestamp();
-                writeByte((byte) type);
-                writeVarLong(DateTimeUtils.getTimeLocalWithoutDst(ts));
-                writeVarInt(ts.getNanos() % 1000000);
+                Timestamp ts = LegacyDateTimeUtils.toTimestamp(null, null, v);
+                writeByte(TIMESTAMP);
+                writeVarLong(ts.getTime() + zoneOffsetMillis);
+                writeVarInt(ts.getNanos() % 1_000_000);
             }
             break;
         }
         case Value.TIMESTAMP_TZ: {
             ValueTimestampTimeZone ts = (ValueTimestampTimeZone) v;
-            writeByte((byte) type);
-            writeVarLong(ts.getDateValue());
-            writeVarLong(ts.getTimeNanos());
-            writeVarInt(ts.getTimeZoneOffsetMins());
+            int timeZoneOffset = ts.getTimeZoneOffsetSeconds();
+            if (timeZoneOffset % 60 == 0) {
+                writeByte(TIMESTAMP_TZ);
+                writeVarLong(ts.getDateValue());
+                writeVarLong(ts.getTimeNanos());
+                writeVarInt(timeZoneOffset / 60);
+            } else {
+                writeByte((byte) TIMESTAMP_TZ_2);
+                writeVarLong(ts.getDateValue());
+                writeVarLong(ts.getTimeNanos());
+                writeTimeZone(timeZoneOffset);
+            }
             break;
         }
         case Value.GEOMETRY:
             // fall though
         case Value.JAVA_OBJECT: {
-            writeByte((byte) type);
+            writeByte(type == Value.GEOMETRY ? GEOMETRY : JAVA_OBJECT);
             byte[] b = v.getBytesNoCopy();
             int len = b.length;
             writeVarInt(len);
             write(b, 0, len);
             break;
         }
-        case Value.BYTES: {
+        case Value.VARBINARY: {
             byte[] b = v.getBytesNoCopy();
             int len = b.length;
             if (len < 32) {
                 writeByte((byte) (BYTES_0_31 + len));
                 write(b, 0, len);
             } else {
-                writeByte((byte) type);
+                writeByte(BYTES);
                 writeVarInt(len);
                 write(b, 0, len);
             }
             break;
         }
         case Value.UUID: {
-            writeByte((byte) type);
+            writeByte(UUID);
             ValueUuid uuid = (ValueUuid) v;
             writeLong(uuid.getHigh());
             writeLong(uuid.getLow());
             break;
         }
-        case Value.STRING: {
+        case Value.VARCHAR: {
             String s = v.getString();
             int len = s.length();
             if (len < 32) {
                 writeByte((byte) (STRING_0_31 + len));
                 writeStringWithoutLength(s, len);
             } else {
-                writeByte((byte) type);
+                writeByte(STRING);
                 writeString(s);
             }
             break;
         }
-        case Value.STRING_IGNORECASE:
-        case Value.STRING_FIXED:
-            writeByte((byte) type);
+        case Value.VARCHAR_IGNORECASE:
+            writeByte(STRING_IGNORECASE);
+            writeString(v.getString());
+            break;
+        case Value.CHAR:
+            writeByte(STRING_FIXED);
             writeString(v.getString());
             break;
         case Value.DOUBLE: {
@@ -600,24 +658,24 @@ public class Data {
             } else {
                 long d = Double.doubleToLongBits(x);
                 if (d == ValueDouble.ZERO_BITS) {
-                    writeByte((byte) DOUBLE_0_1);
+                    writeByte(DOUBLE_0_1);
                 } else {
-                    writeByte((byte) type);
+                    writeByte(DOUBLE);
                     writeVarLong(Long.reverse(d));
                 }
             }
             break;
         }
-        case Value.FLOAT: {
+        case Value.REAL: {
             float x = v.getFloat();
             if (x == 1.0f) {
                 writeByte((byte) (FLOAT_0_1 + 1));
             } else {
                 int f = Float.floatToIntBits(x);
                 if (f == ValueFloat.ZERO_BITS) {
-                    writeByte((byte) FLOAT_0_1);
+                    writeByte(FLOAT_0_1);
                 } else {
-                    writeByte((byte) type);
+                    writeByte(FLOAT);
                     writeVarInt(Integer.reverse(f));
                 }
             }
@@ -625,10 +683,9 @@ public class Data {
         }
         case Value.BLOB:
         case Value.CLOB: {
-            writeByte((byte) type);
+            writeByte(type == Value.BLOB ? BLOB : CLOB);
             if (v instanceof ValueLob) {
                 ValueLob lob = (ValueLob) v;
-                lob.convertToFileIfRequired(handler);
                 byte[] small = lob.getSmall();
                 if (small == null) {
                     int t = -1;
@@ -638,7 +695,7 @@ public class Data {
                     writeVarInt(t);
                     writeVarInt(lob.getTableId());
                     writeVarInt(lob.getObjectId());
-                    writeVarLong(lob.getPrecision());
+                    writeVarLong(lob.getType().getPrecision());
                     writeByte((byte) (lob.isCompressed() ? 1 : 0));
                     if (t == -2) {
                         writeString(lob.getFileName());
@@ -654,7 +711,7 @@ public class Data {
                     writeVarInt(-3);
                     writeVarInt(lob.getTableId());
                     writeVarLong(lob.getLobId());
-                    writeVarLong(lob.getPrecision());
+                    writeVarLong(lob.getType().getPrecision());
                 } else {
                     writeVarInt(small.length);
                     write(small, 0, small.length);
@@ -662,9 +719,10 @@ public class Data {
             }
             break;
         }
-        case Value.ARRAY: {
-            writeByte((byte) type);
-            Value[] list = ((ValueArray) v).getList();
+        case Value.ARRAY:
+        case Value.ROW: {
+            writeByte(type == Value.ARRAY ? ARRAY : ROW);
+            Value[] list = ((ValueCollectionBase) v).getList();
             writeVarInt(list.length);
             for (Value x : list) {
                 writeValue(x);
@@ -672,44 +730,76 @@ public class Data {
             break;
         }
         case Value.RESULT_SET: {
-            writeByte((byte) type);
-            try {
-                ResultSet rs = ((ValueResultSet) v).getResultSet();
-                rs.beforeFirst();
-                ResultSetMetaData meta = rs.getMetaData();
-                int columnCount = meta.getColumnCount();
-                writeVarInt(columnCount);
-                for (int i = 0; i < columnCount; i++) {
-                    writeString(meta.getColumnName(i + 1));
-                    writeVarInt(meta.getColumnType(i + 1));
-                    writeVarInt(meta.getPrecision(i + 1));
-                    writeVarInt(meta.getScale(i + 1));
-                }
-                while (rs.next()) {
-                    writeByte((byte) 1);
-                    for (int i = 0; i < columnCount; i++) {
-                        int t = DataType.getValueTypeFromResultSet(meta, i + 1);
-                        Value val = DataType.readValue(null, rs, i + 1, t);
-                        writeValue(val);
-                    }
-                }
-                writeByte((byte) 0);
-                rs.beforeFirst();
-            } catch (SQLException e) {
-                throw DbException.convert(e);
+            writeByte(RESULT_SET);
+            ResultInterface result = ((ValueResultSet) v).getResult();
+            result.reset();
+            int columnCount = result.getVisibleColumnCount();
+            writeVarInt(columnCount);
+            for (int i = 0; i < columnCount; i++) {
+                writeString(result.getAlias(i));
+                writeString(result.getColumnName(i));
+                TypeInfo columnType = result.getColumnType(i);
+                writeVarInt(columnType.getValueType());
+                writeVarLong(columnType.getPrecision());
+                writeVarInt(columnType.getScale());
             }
+            while (result.next()) {
+                writeByte((byte) 1);
+                Value[] row = result.currentRow();
+                for (int i = 0; i < columnCount; i++) {
+                    writeValue(row[i]);
+                }
+            }
+            writeByte((byte) 0);
+            break;
+        }
+        case Value.INTERVAL_YEAR:
+        case Value.INTERVAL_MONTH:
+        case Value.INTERVAL_DAY:
+        case Value.INTERVAL_HOUR:
+        case Value.INTERVAL_MINUTE: {
+            ValueInterval interval = (ValueInterval) v;
+            int ordinal = type - Value.INTERVAL_YEAR;
+            if (interval.isNegative()) {
+                ordinal = ~ordinal;
+            }
+            writeByte(INTERVAL);
+            writeByte((byte) ordinal);
+            writeVarLong(interval.getLeading());
+            break;
+        }
+        case Value.INTERVAL_SECOND:
+        case Value.INTERVAL_YEAR_TO_MONTH:
+        case Value.INTERVAL_DAY_TO_HOUR:
+        case Value.INTERVAL_DAY_TO_MINUTE:
+        case Value.INTERVAL_DAY_TO_SECOND:
+        case Value.INTERVAL_HOUR_TO_MINUTE:
+        case Value.INTERVAL_HOUR_TO_SECOND:
+        case Value.INTERVAL_MINUTE_TO_SECOND: {
+            ValueInterval interval = (ValueInterval) v;
+            int ordinal = type - Value.INTERVAL_YEAR;
+            if (interval.isNegative()) {
+                ordinal = ~ordinal;
+            }
+            writeByte(INTERVAL);
+            writeByte((byte) ordinal);
+            writeVarLong(interval.getLeading());
+            writeVarLong(interval.getRemaining());
+            break;
+        }
+        case Value.JSON: {
+            writeByte((byte) JSON);
+            byte[] b = v.getBytesNoCopy();
+            int len = b.length;
+            writeVarInt(len);
+            write(b, 0, len);
             break;
         }
         default:
-            DbException.throwInternalError("type=" + v.getType());
+            DbException.throwInternalError("type=" + v.getValueType());
         }
-        if (SysProperties.CHECK2) {
-            if (pos - start != getValueLen(v, handler)) {
-                throw DbException.throwInternalError(
-                            "value size error: got " + (pos - start) +
-                            " expected " + getValueLen(v, handler));
-            }
-        }
+        assert pos - start == getValueLen(v)
+                : "value size error: got " + (pos - start) + " expected " + getValueLen(v);
     }
 
     /**
@@ -720,127 +810,127 @@ public class Data {
     public Value readValue() {
         int type = data[pos++] & 255;
         switch (type) {
-        case Value.NULL:
+        case NULL:
             return ValueNull.INSTANCE;
         case BOOLEAN_TRUE:
-            return ValueBoolean.get(true);
+            return ValueBoolean.TRUE;
         case BOOLEAN_FALSE:
-            return ValueBoolean.get(false);
+            return ValueBoolean.FALSE;
         case INT_NEG:
             return ValueInt.get(-readVarInt());
-        case Value.INT:
+        case ENUM:
+        case INT:
             return ValueInt.get(readVarInt());
         case LONG_NEG:
             return ValueLong.get(-readVarLong());
-        case Value.LONG:
+        case Value.BIGINT:
             return ValueLong.get(readVarLong());
-        case Value.BYTE:
+        case BYTE:
             return ValueByte.get(readByte());
-        case Value.SHORT:
+        case SHORT:
             return ValueShort.get(readShortInt());
         case DECIMAL_0_1:
-            return (ValueDecimal) ValueDecimal.ZERO;
+            return ValueDecimal.ZERO;
         case DECIMAL_0_1 + 1:
-            return (ValueDecimal) ValueDecimal.ONE;
+            return ValueDecimal.ONE;
         case DECIMAL_SMALL_0:
             return ValueDecimal.get(BigDecimal.valueOf(readVarLong()));
         case DECIMAL_SMALL: {
             int scale = readVarInt();
             return ValueDecimal.get(BigDecimal.valueOf(readVarLong(), scale));
         }
-        case Value.DECIMAL: {
+        case DECIMAL: {
             int scale = readVarInt();
             int len = readVarInt();
-            byte[] buff = DataUtils.newBytes(len);
+            byte[] buff = Utils.newBytes(len);
             read(buff, 0, len);
             BigInteger b = new BigInteger(buff);
             return ValueDecimal.get(new BigDecimal(b, scale));
         }
-        case LOCAL_DATE: {
+        case LOCAL_DATE:
             return ValueDate.fromDateValue(readVarLong());
+        case DATE: {
+            long ms = readVarLong() * MILLIS_PER_MINUTE - zoneOffsetMillis;
+            return ValueDate.fromDateValue(LegacyDateTimeUtils.dateValueFromLocalMillis(
+                    ms + LegacyDateTimeUtils.getTimeZoneOffsetMillis(null, ms)));
         }
-        case Value.DATE: {
-            long x = readVarLong() * MILLIS_PER_MINUTE;
-            return ValueDate.fromMillis(DateTimeUtils.getTimeUTCWithoutDst(x));
+        case LOCAL_TIME:
+            return ValueTime.fromNanos(readVarLong() * 1_000_000 + readVarInt());
+        case TIME: {
+            long ms = readVarLong() - zoneOffsetMillis;
+            return ValueTime.fromNanos(LegacyDateTimeUtils.nanosFromLocalMillis(
+                    ms + LegacyDateTimeUtils.getTimeZoneOffsetMillis(null, ms)));
         }
-        case LOCAL_TIME: {
-            long nanos = readVarLong() * 1000000 + readVarLong();
-            return ValueTime.fromNanos(nanos);
-        }
-        case Value.TIME:
-            // need to normalize the year, month and day
-            return ValueTime.fromMillis(
-                    DateTimeUtils.getTimeUTCWithoutDst(readVarLong()));
-        case LOCAL_TIMESTAMP: {
-            long dateValue = readVarLong();
-            long nanos = readVarLong() * 1000000 + readVarLong();
-            return ValueTimestamp.fromDateValueAndNanos(dateValue, nanos);
-        }
-        case Value.TIMESTAMP: {
-            return ValueTimestamp.fromMillisNanos(
-                    DateTimeUtils.getTimeUTCWithoutDst(readVarLong()),
-                    readVarInt());
-        }
-        case Value.TIMESTAMP_TZ: {
+        case TIME_TZ:
+            return ValueTimeTimeZone.fromNanos(readVarInt() * DateTimeUtils.NANOS_PER_SECOND + readVarInt(),
+                    readTimeZone());
+        case LOCAL_TIMESTAMP:
+            return ValueTimestamp.fromDateValueAndNanos(readVarLong(), readVarLong() * 1_000_000 + readVarInt());
+        case TIMESTAMP:
+            return LegacyDateTimeUtils.fromTimestamp(null, readVarLong() - zoneOffsetMillis, readVarInt() % 1_000_000);
+        case TIMESTAMP_TZ: {
             long dateValue = readVarLong();
             long nanos = readVarLong();
-            short tz = (short) readVarInt();
+            int tz = readVarInt() * 60;
             return ValueTimestampTimeZone.fromDateValueAndNanos(dateValue, nanos, tz);
         }
-        case Value.BYTES: {
+        case TIMESTAMP_TZ_2: {
+            long dateValue = readVarLong();
+            long nanos = readVarLong();
+            int tz = readTimeZone();
+            return ValueTimestampTimeZone.fromDateValueAndNanos(dateValue, nanos, tz);
+        }
+        case BYTES: {
             int len = readVarInt();
-            byte[] b = DataUtils.newBytes(len);
+            byte[] b = Utils.newBytes(len);
             read(b, 0, len);
             return ValueBytes.getNoCopy(b);
         }
-        case Value.GEOMETRY: {
+        case GEOMETRY: {
             int len = readVarInt();
-            byte[] b = DataUtils.newBytes(len);
+            byte[] b = Utils.newBytes(len);
             read(b, 0, len);
             return ValueGeometry.get(b);
         }
-        case Value.JAVA_OBJECT: {
+        case JAVA_OBJECT: {
             int len = readVarInt();
-            byte[] b = DataUtils.newBytes(len);
+            byte[] b = Utils.newBytes(len);
             read(b, 0, len);
             return ValueJavaObject.getNoCopy(null, b, handler);
         }
-        case Value.UUID:
+        case UUID:
             return ValueUuid.get(readLong(), readLong());
-        case Value.STRING:
+        case STRING:
             return ValueString.get(readString());
-        case Value.STRING_IGNORECASE:
+        case STRING_IGNORECASE:
             return ValueStringIgnoreCase.get(readString());
-        case Value.STRING_FIXED:
+        case STRING_FIXED:
             return ValueStringFixed.get(readString());
         case FLOAT_0_1:
-            return ValueFloat.get(0);
+            return ValueFloat.ZERO;
         case FLOAT_0_1 + 1:
-            return ValueFloat.get(1);
+            return ValueFloat.ONE;
         case DOUBLE_0_1:
-            return ValueDouble.get(0);
+            return ValueDouble.ZERO;
         case DOUBLE_0_1 + 1:
-            return ValueDouble.get(1);
-        case Value.DOUBLE:
-            return ValueDouble.get(Double.longBitsToDouble(
-                    Long.reverse(readVarLong())));
-        case Value.FLOAT:
-            return ValueFloat.get(Float.intBitsToFloat(
-                    Integer.reverse(readVarInt())));
-        case Value.BLOB:
-        case Value.CLOB: {
+            return ValueDouble.ONE;
+        case DOUBLE:
+            return ValueDouble.get(Double.longBitsToDouble(Long.reverse(readVarLong())));
+        case FLOAT:
+            return ValueFloat.get(Float.intBitsToFloat(Integer.reverse(readVarInt())));
+        case BLOB:
+        case CLOB: {
             int smallLen = readVarInt();
             if (smallLen >= 0) {
-                byte[] small = DataUtils.newBytes(smallLen);
+                byte[] small = Utils.newBytes(smallLen);
                 read(small, 0, smallLen);
-                return ValueLobDb.createSmallLob(type, small);
+                return ValueLobDb.createSmallLob(type == BLOB ? Value.BLOB : Value.CLOB, small);
             } else if (smallLen == -3) {
                 int tableId = readVarInt();
                 long lobId = readVarLong();
                 long precision = readVarLong();
-                ValueLobDb lob = ValueLobDb.create(type, handler, tableId,
+                return ValueLobDb.create(type == BLOB ? Value.BLOB : Value.CLOB, handler, tableId,
                         lobId, null, precision);
-                return lob;
             } else {
                 int tableId = readVarInt();
                 int objectId = readVarInt();
@@ -854,39 +944,52 @@ public class Data {
                 }
                 if (smallLen == -2) {
                     String filename = readString();
-                    return ValueLob.openUnlinked(type, handler, tableId,
+                    return ValueLob.openUnlinked(type == BLOB ? Value.BLOB : Value.CLOB, handler, tableId,
                             objectId, precision, compression, filename);
                 }
-                return ValueLob.openLinked(type, handler, tableId,
+                return ValueLob.openLinked(type == BLOB ? Value.BLOB : Value.CLOB, handler, tableId,
                         objectId, precision, compression);
             }
         }
-        case Value.ARRAY: {
+        case ARRAY:
+        case ROW: // Special storage type for ValueRow
+        {
             int len = readVarInt();
             Value[] list = new Value[len];
             for (int i = 0; i < len; i++) {
                 list[i] = readValue();
             }
-            return ValueArray.get(list);
+            return type == ARRAY ? ValueArray.get(list) : ValueRow.get(list);
         }
-        case Value.RESULT_SET: {
-            SimpleResultSet rs = new SimpleResultSet();
-            rs.setAutoClose(false);
+        case RESULT_SET: {
+            SimpleResult rs = new SimpleResult();
             int columns = readVarInt();
             for (int i = 0; i < columns; i++) {
-                rs.addColumn(readString(), readVarInt(), readVarInt(), readVarInt());
+                rs.addColumn(readString(), readString(), readVarInt(), readVarLong(), readVarInt());
             }
-            while (true) {
-                if (readByte() == 0) {
-                    break;
-                }
-                Object[] o = new Object[columns];
+            while (readByte() != 0) {
+                Value[] o = new Value[columns];
                 for (int i = 0; i < columns; i++) {
-                    o[i] = readValue().getObject();
+                    o[i] = readValue();
                 }
                 rs.addRow(o);
             }
             return ValueResultSet.get(rs);
+        }
+        case INTERVAL: {
+            int ordinal = readByte();
+            boolean negative = ordinal < 0;
+            if (negative) {
+                ordinal = ~ordinal;
+            }
+            return ValueInterval.from(IntervalQualifier.valueOf(ordinal), negative, readVarLong(),
+                    ordinal < 5 ? 0 : readVarLong());
+        }
+        case JSON: {
+            int len = readVarInt();
+            byte[] b = Utils.newBytes(len);
+            read(b, 0, len);
+            return ValueJson.getInternal(b);
         }
         default:
             if (type >= INT_0_15 && type < INT_0_15 + 16) {
@@ -895,7 +998,7 @@ public class Data {
                 return ValueLong.get(type - LONG_0_7);
             } else if (type >= BYTES_0_31 && type < BYTES_0_31 + 32) {
                 int len = type - BYTES_0_31;
-                byte[] b = DataUtils.newBytes(len);
+                byte[] b = Utils.newBytes(len);
                 read(b, 0, len);
                 return ValueBytes.getNoCopy(b);
             } else if (type >= STRING_0_31 && type < STRING_0_31 + 32) {
@@ -912,27 +1015,30 @@ public class Data {
      * @return the number of bytes required to store this value
      */
     public int getValueLen(Value v) {
-        return getValueLen(v, handler);
+        return getValueLen(v, storeLocalTime);
     }
 
     /**
      * Calculate the number of bytes required to encode the given value.
      *
      * @param v the value
-     * @param handler the data handler for lobs
+     * @param storeLocalTime
+     *            calculate size of DATE, TIME, and TIMESTAMP values with local
+     *            time storage format
      * @return the number of bytes required to store this value
      */
-    public static int getValueLen(Value v, DataHandler handler) {
+    public static int getValueLen(Value v, boolean storeLocalTime) {
         if (v == ValueNull.INSTANCE) {
             return 1;
         }
-        switch (v.getType()) {
+        switch (v.getValueType()) {
         case Value.BOOLEAN:
             return 1;
-        case Value.BYTE:
+        case Value.TINYINT:
             return 2;
-        case Value.SHORT:
+        case Value.SMALLINT:
             return 3;
+        case Value.ENUM:
         case Value.INT: {
             int x = v.getInt();
             if (x < 0) {
@@ -943,7 +1049,7 @@ public class Data {
                 return 1 + getVarIntLen(x);
             }
         }
-        case Value.LONG: {
+        case Value.BIGINT: {
             long x = v.getLong();
             if (x < 0) {
                 return 1 + getVarLongLen(-x);
@@ -964,7 +1070,7 @@ public class Data {
             }
             return 1 + getVarLongLen(Long.reverse(d));
         }
-        case Value.FLOAT: {
+        case Value.REAL: {
             float x = v.getFloat();
             if (x == 1.0f) {
                 return 1;
@@ -975,7 +1081,7 @@ public class Data {
             }
             return 1 + getVarIntLen(Integer.reverse(f));
         }
-        case Value.STRING: {
+        case Value.VARCHAR: {
             String s = v.getString();
             int len = s.length();
             if (len < 32) {
@@ -983,10 +1089,10 @@ public class Data {
             }
             return 1 + getStringLen(s);
         }
-        case Value.STRING_IGNORECASE:
-        case Value.STRING_FIXED:
+        case Value.VARCHAR_IGNORECASE:
+        case Value.CHAR:
             return 1 + getStringLen(v.getString());
-        case Value.DECIMAL: {
+        case Value.NUMERIC: {
             BigDecimal x = v.getBigDecimal();
             if (BigDecimal.ZERO.equals(x)) {
                 return 1;
@@ -1006,49 +1112,55 @@ public class Data {
             return 1 + getVarIntLen(scale) + getVarIntLen(bytes.length) + bytes.length;
         }
         case Value.TIME:
-            if (STORE_LOCAL_TIME) {
+            if (storeLocalTime) {
                 long nanos = ((ValueTime) v).getNanos();
-                long millis = nanos / 1000000;
-                nanos -= millis * 1000000;
+                long millis = nanos / 1_000_000;
+                nanos -= millis * 1_000_000;
                 return 1 + getVarLongLen(millis) + getVarLongLen(nanos);
             }
-            return 1 + getVarLongLen(DateTimeUtils.getTimeLocalWithoutDst(v.getTime()));
+            return 1 + getVarLongLen(LegacyDateTimeUtils.toTime(null, null, v).getTime() + zoneOffsetMillis);
+        case Value.TIME_TZ: {
+            ValueTimeTimeZone ts = (ValueTimeTimeZone) v;
+            long nanosOfDay = ts.getNanos();
+            int tz = ts.getTimeZoneOffsetSeconds();
+            return 1 + getVarIntLen((int) (nanosOfDay / DateTimeUtils.NANOS_PER_SECOND))
+                    + getVarIntLen((int) (nanosOfDay % DateTimeUtils.NANOS_PER_SECOND)) + getTimeZoneLen(tz);
+        }
         case Value.DATE: {
-            if (STORE_LOCAL_TIME) {
+            if (storeLocalTime) {
                 long dateValue = ((ValueDate) v).getDateValue();
                 return 1 + getVarLongLen(dateValue);
             }
-            long x = DateTimeUtils.getTimeLocalWithoutDst(v.getDate());
+            long x = LegacyDateTimeUtils.toDate(null, null, v).getTime() + zoneOffsetMillis;
             return 1 + getVarLongLen(x / MILLIS_PER_MINUTE);
         }
         case Value.TIMESTAMP: {
-            if (STORE_LOCAL_TIME) {
+            if (storeLocalTime) {
                 ValueTimestamp ts = (ValueTimestamp) v;
                 long dateValue = ts.getDateValue();
                 long nanos = ts.getTimeNanos();
-                long millis = nanos / 1000000;
-                nanos -= millis * 1000000;
+                long millis = nanos / 1_000_000;
+                nanos -= millis * 1_000_000;
                 return 1 + getVarLongLen(dateValue) + getVarLongLen(millis) +
                         getVarLongLen(nanos);
             }
-            Timestamp ts = v.getTimestamp();
-            return 1 + getVarLongLen(DateTimeUtils.getTimeLocalWithoutDst(ts)) +
-                    getVarIntLen(ts.getNanos() % 1000000);
+            Timestamp ts = LegacyDateTimeUtils.toTimestamp(null, null, v);
+            return 1 + getVarLongLen(ts.getTime() + zoneOffsetMillis) + getVarIntLen(ts.getNanos() % 1_000_000);
         }
         case Value.TIMESTAMP_TZ: {
             ValueTimestampTimeZone ts = (ValueTimestampTimeZone) v;
             long dateValue = ts.getDateValue();
             long nanos = ts.getTimeNanos();
-            short tz = ts.getTimeZoneOffsetMins();
+            int tz = ts.getTimeZoneOffsetSeconds();
             return 1 + getVarLongLen(dateValue) + getVarLongLen(nanos) +
-                    getVarIntLen(tz);
+                    (tz % 60 == 0 ? getVarIntLen(tz / 60) : getTimeZoneLen(tz));
         }
         case Value.GEOMETRY:
         case Value.JAVA_OBJECT: {
             byte[] b = v.getBytesNoCopy();
             return 1 + getVarIntLen(b.length) + b.length;
         }
-        case Value.BYTES: {
+        case Value.VARBINARY: {
             byte[] b = v.getBytesNoCopy();
             int len = b.length;
             if (len < 32) {
@@ -1063,7 +1175,6 @@ public class Data {
             int len = 1;
             if (v instanceof ValueLob) {
                 ValueLob lob = (ValueLob) v;
-                lob.convertToFileIfRequired(handler);
                 byte[] small = lob.getSmall();
                 if (small == null) {
                     int t = -1;
@@ -1073,7 +1184,7 @@ public class Data {
                     len += getVarIntLen(t);
                     len += getVarIntLen(lob.getTableId());
                     len += getVarIntLen(lob.getObjectId());
-                    len += getVarLongLen(lob.getPrecision());
+                    len += getVarLongLen(lob.getType().getPrecision());
                     len += 1;
                     if (t == -2) {
                         len += getStringLen(lob.getFileName());
@@ -1089,7 +1200,7 @@ public class Data {
                     len += getVarIntLen(-3);
                     len += getVarIntLen(lob.getTableId());
                     len += getVarLongLen(lob.getLobId());
-                    len += getVarLongLen(lob.getPrecision());
+                    len += getVarLongLen(lob.getType().getPrecision());
                 } else {
                     len += getVarIntLen(small.length);
                     len += small.length;
@@ -1097,45 +1208,64 @@ public class Data {
             }
             return len;
         }
-        case Value.ARRAY: {
-            Value[] list = ((ValueArray) v).getList();
+        case Value.ARRAY:
+        case Value.ROW: {
+            Value[] list = ((ValueCollectionBase) v).getList();
             int len = 1 + getVarIntLen(list.length);
             for (Value x : list) {
-                len += getValueLen(x, handler);
+                len += getValueLen(x, storeLocalTime);
             }
             return len;
         }
         case Value.RESULT_SET: {
             int len = 1;
-            try {
-                ResultSet rs = ((ValueResultSet) v).getResultSet();
-                rs.beforeFirst();
-                ResultSetMetaData meta = rs.getMetaData();
-                int columnCount = meta.getColumnCount();
-                len += getVarIntLen(columnCount);
-                for (int i = 0; i < columnCount; i++) {
-                    len += getStringLen(meta.getColumnName(i + 1));
-                    len += getVarIntLen(meta.getColumnType(i + 1));
-                    len += getVarIntLen(meta.getPrecision(i + 1));
-                    len += getVarIntLen(meta.getScale(i + 1));
-                }
-                while (rs.next()) {
-                    len++;
-                    for (int i = 0; i < columnCount; i++) {
-                        int t = DataType.getValueTypeFromResultSet(meta, i + 1);
-                        Value val = DataType.readValue(null, rs, i + 1, t);
-                        len += getValueLen(val, handler);
-                    }
-                }
-                len++;
-                rs.beforeFirst();
-            } catch (SQLException e) {
-                throw DbException.convert(e);
+            ResultInterface result = ((ValueResultSet) v).getResult();
+            int columnCount = result.getVisibleColumnCount();
+            len += getVarIntLen(columnCount);
+            for (int i = 0; i < columnCount; i++) {
+                len += getStringLen(result.getAlias(i));
+                len += getStringLen(result.getColumnName(i));
+                TypeInfo columnType = result.getColumnType(i);
+                len += getVarIntLen(columnType.getValueType());
+                len += getVarLongLen(columnType.getPrecision());
+                len += getVarIntLen(columnType.getScale());
             }
+            while (result.next()) {
+                len++;
+                Value[] row = result.currentRow();
+                for (int i = 0; i < columnCount; i++) {
+                    Value val = row[i];
+                    len += getValueLen(val, storeLocalTime);
+                }
+            }
+            len++;
             return len;
         }
+        case Value.INTERVAL_YEAR:
+        case Value.INTERVAL_MONTH:
+        case Value.INTERVAL_DAY:
+        case Value.INTERVAL_HOUR:
+        case Value.INTERVAL_MINUTE: {
+            ValueInterval interval = (ValueInterval) v;
+            return 2 + getVarLongLen(interval.getLeading());
+        }
+        case Value.INTERVAL_SECOND:
+        case Value.INTERVAL_YEAR_TO_MONTH:
+        case Value.INTERVAL_DAY_TO_HOUR:
+        case Value.INTERVAL_DAY_TO_MINUTE:
+        case Value.INTERVAL_DAY_TO_SECOND:
+        case Value.INTERVAL_HOUR_TO_MINUTE:
+        case Value.INTERVAL_HOUR_TO_SECOND:
+        case Value.INTERVAL_MINUTE_TO_SECOND: {
+            ValueInterval interval = (ValueInterval) v;
+            return 2 + getVarLongLen(interval.getLeading()) + getVarLongLen(interval.getRemaining());
+        }
+        case Value.JSON: {
+            byte[] b = v.getBytesNoCopy();
+            return 1 + getVarIntLen(b.length) + b.length;
+        }
         default:
-            throw DbException.throwInternalError("type=" + v.getType());
+            throw DbException.throwInternalError("type=" + v.getValueType());
         }
     }
 
@@ -1178,8 +1308,7 @@ public class Data {
      */
     public void truncate(int size) {
         if (pos > size) {
-            byte[] buff = new byte[size];
-            System.arraycopy(data, 0, buff, 0, size);
+            byte[] buff = Arrays.copyOf(data, size);
             this.pos = size;
             data = buff;
         }
@@ -1211,7 +1340,7 @@ public class Data {
      */
     public void writeVarInt(int x) {
         while ((x & ~0x7f) != 0) {
-            data[pos++] = (byte) (0x80 | (x & 0x7f));
+            data[pos++] = (byte) (x | 0x80);
             x >>>= 7;
         }
         data[pos++] = (byte) x;
@@ -1280,7 +1409,7 @@ public class Data {
      */
     public void writeVarLong(long x) {
         while ((x & ~0x7f) != 0) {
-            data[pos++] = (byte) ((x & 0x7f) | 0x80);
+            data[pos++] = (byte) (x | 0x80);
             x >>>= 7;
         }
         data[pos++] = (byte) x;
@@ -1306,6 +1435,42 @@ public class Data {
         }
     }
 
+    private static int getTimeZoneLen(int timeZoneOffset) {
+        if (timeZoneOffset % 900 == 0) {
+            return 1;
+        } else if (timeZoneOffset > 0) {
+            return getVarIntLen(timeZoneOffset) + 1;
+        } else {
+            return getVarIntLen(-timeZoneOffset) + 1;
+        }
+    }
+
+    private void writeTimeZone(int timeZoneOffset) {
+        // Valid JSR-310 offsets are -64,800..64,800
+        // Use 1 byte for common time zones (including +8:45 etc.)
+        if (timeZoneOffset % 900 == 0) {
+            // -72..72
+            writeByte((byte) (timeZoneOffset / 900));
+        } else if (timeZoneOffset > 0) {
+            writeByte(Byte.MAX_VALUE);
+            writeVarInt(timeZoneOffset);
+        } else {
+            writeByte(Byte.MIN_VALUE);
+            writeVarInt(-timeZoneOffset);
+        }
+    }
+
+    private int readTimeZone() {
+        byte x = data[pos++];
+        if (x == Byte.MAX_VALUE) {
+            return readVarInt();
+        } else if (x == Byte.MIN_VALUE) {
+            return -readVarInt();
+        } else {
+            return x * 900;
+        }
+    }
+
     /**
      * Check if there is still enough capacity in the buffer.
      * This method extends the buffer if required.
@@ -1320,11 +1485,9 @@ public class Data {
     }
 
     private void expand(int plus) {
-        byte[] d = DataUtils.newBytes((data.length + plus) * 2);
         // must copy everything, because pos could be 0 and data may be
         // still required
-        System.arraycopy(data, 0, d, 0, data.length);
-        data = d;
+        data = Utils.copyBytes(data, (data.length + plus) * 2);
     }
 
     /**
@@ -1349,7 +1512,7 @@ public class Data {
     public static void copyString(Reader source, OutputStream target)
             throws IOException {
         char[] buff = new char[Constants.IO_BUFFER_SIZE];
-        Data d = new Data(null, new byte[3 * Constants.IO_BUFFER_SIZE]);
+        Data d = new Data(null, new byte[3 * Constants.IO_BUFFER_SIZE], false);
         while (true) {
             int l = source.read(buff);
             if (l < 0) {
@@ -1363,6 +1526,14 @@ public class Data {
 
     public DataHandler getHandler() {
         return handler;
+    }
+
+    /**
+     * Reset the cached calendar for default timezone, for example after
+     * changing the default timezone.
+     */
+    public static void resetCalendar() {
+        zoneOffsetMillis = new GregorianCalendar().get(Calendar.ZONE_OFFSET);
     }
 
 }

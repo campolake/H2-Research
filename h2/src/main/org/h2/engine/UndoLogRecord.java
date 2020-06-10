@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
@@ -8,6 +8,7 @@ package org.h2.engine;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.result.Row;
+import org.h2.result.SearchRow;
 import org.h2.store.Data;
 import org.h2.store.FileStore;
 import org.h2.table.Table;
@@ -66,10 +67,7 @@ public class UndoLogRecord {
      */
     boolean canStore() {
         // if large transactions are enabled, this method is not called
-        if (table.getUniqueIndex() != null) {
-            return true;
-        }
-        return false;
+        return table.getUniqueIndex() != null;
     }
 
     /**
@@ -79,20 +77,12 @@ public class UndoLogRecord {
      * @param session the session
      */
     void undo(Session session) {
-        Database db = session.getDatabase();
         switch (operation) {
         case INSERT:
             if (state == IN_MEMORY_INVALID) {
                 state = IN_MEMORY;
             }
-            if (db.getLockMode() == Constants.LOCK_MODE_OFF) {
-                if (row.isDeleted()) {
-                    // it might have been deleted by another thread
-                    return;
-                }
-            }
             try {
-                row.setDeleted(false);
                 table.removeRow(session, row);
                 table.fireAfterRow(session, row, null, true);
             } catch (DbException e) {
@@ -109,9 +99,6 @@ public class UndoLogRecord {
             try {
                 table.addRow(session, row);
                 table.fireAfterRow(session, null, row, true);
-                // reset session id, otherwise other sessions think
-                // that this row was inserted by this session
-                row.commit();
             } catch (DbException e) {
                 if (session.getDatabase().getLockMode() == Constants.LOCK_MODE_OFF
                         && e.getSQLException().getErrorCode() == ErrorCode.DUPLICATE_KEY_1) {
@@ -137,10 +124,8 @@ public class UndoLogRecord {
         int p = buff.length();
         buff.writeInt(0);
         buff.writeInt(operation);
-        buff.writeByte(row.isDeleted() ? (byte) 1 : (byte) 0);
         buff.writeInt(log.getTableId(table));
         buff.writeLong(row.getKey());
-        buff.writeInt(row.getSessionId());
         int count = row.getColumnCount();
         buff.writeInt(count);
         for (int i = 0; i < count; i++) {
@@ -203,28 +188,21 @@ public class UndoLogRecord {
         }
         int oldOp = operation;
         load(buff, log);
-        if (SysProperties.CHECK) {
-            if (operation != oldOp) {
-                DbException.throwInternalError("operation=" + operation + " op=" + oldOp);
-            }
+        if (operation != oldOp) {
+            DbException.throwInternalError("operation=" + operation + " op=" + oldOp);
         }
     }
 
     private void load(Data buff, UndoLog log) {
         operation = (short) buff.readInt();
-        boolean deleted = buff.readByte() == 1;
         table = log.getTable(buff.readInt());
         long key = buff.readLong();
-        int sessionId = buff.readInt();
         int columnCount = buff.readInt();
         Value[] values = new Value[columnCount];
         for (int i = 0; i < columnCount; i++) {
             values[i] = buff.readValue();
         }
-        row = getTable().getDatabase().createRow(values, Row.MEMORY_CALCULATE);
-        row.setKey(key);
-        row.setDeleted(deleted);
-        row.setSessionId(sessionId);
+        row = table.createRow(values, SearchRow.MEMORY_CALCULATE, key);
         state = IN_MEMORY_INVALID;
     }
 
@@ -244,14 +222,6 @@ public class UndoLogRecord {
      */
     public long getFilePos() {
         return filePos;
-    }
-
-    /**
-     * This method is called after the operation was committed.
-     * It commits the change to the indexes.
-     */
-    void commit() {
-        table.commit(operation, row);
     }
 
     /**

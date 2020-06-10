@@ -1,11 +1,10 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.engine;
 
-import java.nio.charset.Charset;
 import java.sql.ResultSet;
 
 /**
@@ -16,22 +15,22 @@ public class Constants {
     /**
      * The build date is updated for each public release.
      */
-    public static final String BUILD_DATE = "2017-06-10";
+    public static final String BUILD_DATE = "2019-10-14";
 
     /**
      * The build date of the last stable release.
      */
-    public static final String BUILD_DATE_STABLE = "2017-04-23";
+    public static final String BUILD_DATE_STABLE = "2019-03-13";
 
     /**
      * The build id is incremented for each public release.
      */
-    public static final int BUILD_ID = 196;
+    public static final int BUILD_ID = 200;
 
     /**
      * The build id of the last stable release.
      */
-    public static final int BUILD_ID_STABLE = 195;
+    public static final int BUILD_ID_STABLE = 199;
 
     /**
      * Whether this is a snapshot version.
@@ -47,59 +46,80 @@ public class Constants {
     public static final String BUILD_VENDOR_AND_VERSION = null;
 
     /**
-     * The TCP protocol version number 6.
-     */
-    public static final int TCP_PROTOCOL_VERSION_6 = 6;
-
-    /**
-     * The TCP protocol version number 7.
-     */
-    public static final int TCP_PROTOCOL_VERSION_7 = 7;
-
-    /**
-     * The TCP protocol version number 8.
-     */
-    public static final int TCP_PROTOCOL_VERSION_8 = 8;
-
-    /**
      * The TCP protocol version number 9.
+     * @since 1.3.158 (2011-07-17)
      */
     public static final int TCP_PROTOCOL_VERSION_9 = 9;
 
     /**
      * The TCP protocol version number 10.
+     * @since 1.3.162 (2011-11-26)
      */
     public static final int TCP_PROTOCOL_VERSION_10 = 10;
 
     /**
      * The TCP protocol version number 11.
+     * @since 1.3.163 (2011-12-30)
      */
     public static final int TCP_PROTOCOL_VERSION_11 = 11;
 
     /**
      * The TCP protocol version number 12.
+     * @since 1.3.168 (2012-07-13)
      */
     public static final int TCP_PROTOCOL_VERSION_12 = 12;
 
     /**
      * The TCP protocol version number 13.
+     * @since 1.3.174 (2013-10-19)
      */
     public static final int TCP_PROTOCOL_VERSION_13 = 13;
 
     /**
      * The TCP protocol version number 14.
+     * @since 1.3.176 (2014-04-05)
      */
     public static final int TCP_PROTOCOL_VERSION_14 = 14;
 
     /**
      * The TCP protocol version number 15.
+     * @since 1.4.178 Beta (2014-05-02)
      */
     public static final int TCP_PROTOCOL_VERSION_15 = 15;
 
     /**
      * The TCP protocol version number 16.
+     * @since 1.4.194 (2017-03-10)
      */
     public static final int TCP_PROTOCOL_VERSION_16 = 16;
+
+    /**
+     * The TCP protocol version number 17.
+     * @since 1.4.197 (2018-03-18)
+     */
+    public static final int TCP_PROTOCOL_VERSION_17 = 17;
+
+    /**
+     * The TCP protocol version number 18.
+     * @since 1.4.198 (2019-02-22)
+     */
+    public static final int TCP_PROTOCOL_VERSION_18 = 18;
+
+    /**
+     * The TCP protocol version number 19.
+     * @since 1.4.200 (2019-10-14)
+     */
+    public static final int TCP_PROTOCOL_VERSION_19 = 19;
+
+    /**
+     * Minimum supported version of TCP protocol.
+     */
+    public static final int TCP_PROTOCOL_VERSION_MIN_SUPPORTED = TCP_PROTOCOL_VERSION_9;
+
+    /**
+     * Maximum supported version of TCP protocol.
+     */
+    public static final int TCP_PROTOCOL_VERSION_MAX_SUPPORTED = TCP_PROTOCOL_VERSION_19;
 
     /**
      * The major version of this database.
@@ -150,6 +170,11 @@ public class Constants {
      * texts).
      */
     public static final int ALLOW_LITERALS_NUMBERS = 1;
+
+    /**
+     * SNAPSHOT isolation level of transaction.
+     */
+    public static final int TRANSACTION_SNAPSHOT = 6;
 
     /**
      * Whether searching in Blob values should be supported.
@@ -232,12 +257,12 @@ public class Constants {
     /**
      * The default value for the MAX_MEMORY_UNDO setting.
      */
-    public static final int DEFAULT_MAX_MEMORY_UNDO = 50000;
+    public static final int DEFAULT_MAX_MEMORY_UNDO = 50_000;
 
     /**
      * The default for the setting MAX_OPERATION_MEMORY.
      */
-    public static final int DEFAULT_MAX_OPERATION_MEMORY = 100000;
+    public static final int DEFAULT_MAX_OPERATION_MEMORY = 100_000;
 
     /**
      * The default page size to use for new databases.
@@ -298,7 +323,7 @@ public class Constants {
     /**
      * The highest possible parameter index.
      */
-    public static final int MAX_PARAMETER_INDEX = 100000;
+    public static final int MAX_PARAMETER_INDEX = 100_000;
 
     /**
      * The memory needed by a object of class Data
@@ -316,6 +341,11 @@ public class Constants {
     // Java 6, 64 bit: 24
     // Java 6, 32 bit: 12
     public static final int MEMORY_OBJECT = 24;
+
+    /**
+     * The memory needed by an array.
+     */
+    public static final int MEMORY_ARRAY = 24;
 
     /**
      * The memory needed by an object of class PageBtree.
@@ -368,6 +398,11 @@ public class Constants {
     public static final String PREFIX_PRIMARY_KEY = "PRIMARY_KEY_";
 
     /**
+     * The name prefix used for query aliases that are not explicitly named.
+     */
+    public static final String PREFIX_QUERY_ALIAS = "QUERY_ALIAS_";
+
+    /**
      * Every user belongs to this role.
      */
     public static final String PUBLIC_ROLE_NAME = "PUBLIC";
@@ -376,6 +411,16 @@ public class Constants {
      * The number of bytes in random salt that is used to hash passwords.
      */
     public static final int SALT_LEN = 8;
+
+    /**
+     * The identity of INFORMATION_SCHEMA.
+     */
+    public static final int INFORMATION_SCHEMA_ID = -1;
+
+    /**
+     * The identity of PUBLIC schema.
+     */
+    public static final int MAIN_SCHEMA_ID = 0;
 
     /**
      * The name of the default schema.
@@ -390,7 +435,7 @@ public class Constants {
     /**
      * The number of distinct values to keep in memory when running ANALYZE.
      */
-    public static final int SELECTIVITY_DISTINCT_COUNT = 10000;
+    public static final int SELECTIVITY_DISTINCT_COUNT = 10_000;
 
     /**
      * The default directory name of the server properties file for the H2
@@ -472,7 +517,8 @@ public class Constants {
     public static final String SUFFIX_TRACE_FILE = ".trace.db";
 
     /**
-     * The delay that is to be used if throttle has been enabled.
+     * How often we check to see if we need to apply a throttling delay if SET
+     * THROTTLE has been used.
      */
     public static final int THROTTLE_DELAY = 50;
 
@@ -494,15 +540,10 @@ public class Constants {
     public static final String USER_PACKAGE = "org.h2.dynamic";
 
     /**
-     * Name of the character encoding format.
-     */
-    public static final Charset UTF8 = Charset.forName("UTF-8");
-
-    /**
      * The maximum time in milliseconds to keep the cost of a view.
      * 10000 means 10 seconds.
      */
-    public static final int VIEW_COST_CACHE_MAX_AGE = 10000;
+    public static final int VIEW_COST_CACHE_MAX_AGE = 10_000;
 
     /**
      * The name of the index cache that is used for temporary view (subqueries
@@ -515,44 +556,42 @@ public class Constants {
      */
     public static final int QUERY_STATISTICS_MAX_ENTRIES = 100;
 
-    private Constants() {
-        // utility class
-    }
+    /**
+     * Announced version for PgServer.
+     */
+    public static final String PG_VERSION = "8.2.23";
 
     /**
-     * Get the version of this product, consisting of major version, minor
+     * The version of this product, consisting of major version, minor
      * version, and build id.
-     *
-     * @return the version number
      */
-    public static String getVersion() {
-        String version = VERSION_MAJOR + "." + VERSION_MINOR + "." + BUILD_ID;
+    public static final String VERSION;
+
+    /**
+     * The last stable version name.
+     */
+    public static final String VERSION_STABLE = "1.4." + BUILD_ID_STABLE;
+
+    /**
+     * The complete version number of this database, consisting of
+     * the major version, the minor version, the build id, and the build date.
+     */
+    public static final String FULL_VERSION;
+
+    static {
+        String version = VERSION_MAJOR + "." + VERSION_MINOR + '.' + BUILD_ID;
         if (BUILD_VENDOR_AND_VERSION != null) {
-            version += "_" + BUILD_VENDOR_AND_VERSION;
+            version += '_' + BUILD_VENDOR_AND_VERSION;
         }
         if (BUILD_SNAPSHOT) {
             version += "-SNAPSHOT";
         }
-        return version;
+        VERSION = version;
+        FULL_VERSION = version + (" (" + BUILD_DATE + ')');
     }
 
-    /**
-     * Get the last stable version name.
-     *
-     * @return the version number
-     */
-    public static Object getVersionStable() {
-        return "1.4." + BUILD_ID_STABLE;
-    }
-
-    /**
-     * Get the complete version number of this database, consisting of
-     * the major version, the minor version, the build id, and the build date.
-     *
-     * @return the complete version
-     */
-    public static String getFullVersion() {
-        return getVersion() + " (" + BUILD_DATE + ")";
+    private Constants() {
+        // utility class
     }
 
 }

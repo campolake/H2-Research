@@ -1,17 +1,18 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
 
-import java.util.HashMap;
 import org.h2.api.ErrorCode;
 import org.h2.command.Parser;
 import org.h2.command.dml.Select;
+import org.h2.command.dml.SelectGroups;
 import org.h2.command.dml.SelectListColumnResolver;
 import org.h2.engine.Database;
 import org.h2.engine.Session;
+import org.h2.expression.condition.Comparison;
 import org.h2.index.IndexCondition;
 import org.h2.message.DbException;
 import org.h2.schema.Constant;
@@ -20,9 +21,11 @@ import org.h2.table.Column;
 import org.h2.table.ColumnResolver;
 import org.h2.table.Table;
 import org.h2.table.TableFilter;
+import org.h2.value.ExtTypeInfo;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 import org.h2.value.ValueBoolean;
-import org.h2.value.ValueEnum;
+import org.h2.value.ValueNull;
 
 /**
  * A expression that represents a column of a table or view.
@@ -32,13 +35,17 @@ public class ExpressionColumn extends Expression {
     private final Database database;
     private final String schemaName;
     private final String tableAlias;
-    private final String columnName;
+    private String columnName;
+    private final boolean rowId;
     private ColumnResolver columnResolver;
     private int queryLevel;
     private Column column;
-    private boolean evaluatable;
-    
-    private Select select; //我加上的
+//<<<<<<< HEAD
+//    private boolean evaluatable;
+//    
+//    private Select select; //我加上的
+//=======
+//>>>>>>> d9a7cf0dcb563abb69ed313f35cdebfebe544674
 
     public ExpressionColumn(Database database, Column column) {
         this.database = database;
@@ -46,37 +53,42 @@ public class ExpressionColumn extends Expression {
         this.schemaName = null;
         this.tableAlias = null;
         this.columnName = null;
+        this.rowId = column.isRowId();
     }
     
     //对于SELECT public.t.id FROM ExpressionColumnTest as t
     //schemaName = public
     //tableAlias = t
     //columnName = id
-    public ExpressionColumn(Database database, String schemaName, String tableAlias, String columnName) {
+    public ExpressionColumn(Database database, String schemaName,
+            String tableAlias, String columnName, boolean rowId) {
         this.database = database;
         this.schemaName = schemaName;
         this.tableAlias = tableAlias;
         this.columnName = columnName;
+        this.rowId = rowId;
     }
 
     @Override
-    public String getSQL() {
-        String sql;
-        boolean quote = database.getSettings().databaseToUpper;
-        if (column != null) {
-            sql = column.getSQL();
-        } else {
-            sql = quote ? Parser.quoteIdentifier(columnName) : columnName;
+    public StringBuilder getSQL(StringBuilder builder, boolean alwaysQuote) {
+        if (schemaName != null) {
+            Parser.quoteIdentifier(builder, schemaName, alwaysQuote).append('.');
         }
         if (tableAlias != null) {
-            String a = quote ? Parser.quoteIdentifier(tableAlias) : tableAlias;
-            sql = a + "." + sql;
+            Parser.quoteIdentifier(builder, tableAlias, alwaysQuote).append('.');
         }
-        if (schemaName != null) {
-            String s = quote ? Parser.quoteIdentifier(schemaName) : schemaName;
-            sql = s + "." + sql;
+        if (column != null) {
+            if (columnResolver != null && columnResolver.hasDerivedColumnList()) {
+                Parser.quoteIdentifier(builder, columnResolver.getColumnName(column), alwaysQuote);
+            } else {
+                column.getSQL(builder, alwaysQuote);
+            }
+        } else if (rowId) {
+            builder.append(columnName);
+        } else {
+            Parser.quoteIdentifier(builder, columnName, alwaysQuote);
         }
-        return sql;
+        return builder;
     }
 
     public TableFilter getTableFilter() {
@@ -84,10 +96,13 @@ public class ExpressionColumn extends Expression {
     }
 
     @Override
-    public void mapColumns(ColumnResolver resolver, int level) {
-        //我加上的
-        if (select == null)
-            select = resolver.getSelect();
+//<<<<<<< HEAD
+//    public void mapColumns(ColumnResolver resolver, int level) {
+//        //我加上的
+//        if (select == null)
+//            select = resolver.getSelect();
+//=======
+    public void mapColumns(ColumnResolver resolver, int level, int state) {
         if (tableAlias != null && !database.equalsIdentifiers(
                 tableAlias, resolver.getTableAlias())) {
             return;
@@ -96,23 +111,21 @@ public class ExpressionColumn extends Expression {
                 schemaName, resolver.getSchemaName())) {
             return;
         }
-        for (Column col : resolver.getColumns()) {
-            String n = col.getName();
-            if (database.equalsIdentifiers(columnName, n)) {
-                mapColumn(resolver, col, level);
-                return;
-            }
-        }
-        if (database.equalsIdentifiers(Column.ROWID, columnName)) {
+        if (rowId) {
             Column col = resolver.getRowIdColumn();
             if (col != null) {
                 mapColumn(resolver, col, level);
-                return;
             }
+            return;
+        }
+        Column col = resolver.findColumn(columnName);
+        if (col != null) {
+            mapColumn(resolver, col, level);
+            return;
         }
         Column[] columns = resolver.getSystemColumns();
         for (int i = 0; columns != null && i < columns.length; i++) {
-            Column col = columns[i];
+            col = columns[i];
             if (database.equalsIdentifiers(columnName, col.getName())) {
                 mapColumn(resolver, col, level);
                 return;
@@ -148,47 +161,75 @@ public class ExpressionColumn extends Expression {
                     return constant.getValue(); //对于常量字段的优化是直接返回ValueExpression
                 }
             }
-            //我加上的
-//            if (select != null) {
-//                for (Expression e : select.getExpressions()) {
-//                    if (database.equalsIdentifiers(columnName, e.getAlias()))
-//                        return e.getNonAliasExpression().optimize(session);
+//<<<<<<< HEAD
+//            //我加上的
+////            if (select != null) {
+////                for (Expression e : select.getExpressions()) {
+////                    if (database.equalsIdentifiers(columnName, e.getAlias()))
+////                        return e.getNonAliasExpression().optimize(session);
+////                }
+////            }
+//            String name = columnName;
+//            if (tableAlias != null) {
+//                name = tableAlias + "." + name;
+//                if (schemaName != null) {
+//                    name = schemaName + "." + name;
 //                }
 //            }
-            String name = columnName;
-            if (tableAlias != null) {
-                name = tableAlias + "." + name;
-                if (schemaName != null) {
-                    name = schemaName + "." + name;
-                }
-            }
-            throw DbException.get(ErrorCode.COLUMN_NOT_FOUND_1, name);
+//            throw DbException.get(ErrorCode.COLUMN_NOT_FOUND_1, name);
+//=======
+            throw getColumnException(ErrorCode.COLUMN_NOT_FOUND_1);
         }
         return columnResolver.optimize(this, column);
     }
 
+    /**
+     * Get exception to throw, with column and table info added
+     * @param code SQL error code
+     * @return DbException
+     */
+    public DbException getColumnException(int code) {
+        String name = columnName;
+        if (tableAlias != null) {
+            name = tableAlias + '.' + name;
+            if (schemaName != null) {
+                name = schemaName + '.' + name;
+            }
+        }
+        return DbException.get(code, name);
+    }
+
     @Override
-    public void updateAggregate(Session session) {
-        Value now = columnResolver.getValue(column);
+    public void updateAggregate(Session session, int stage) {
         Select select = columnResolver.getSelect();
         if (select == null) {
-            throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
+            throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL(false));
         }
-        HashMap<Expression, Object> values = select.getCurrentGroup();
-        if (values == null) {
+        SelectGroups groupData = select.getGroupDataIfCurrent(false);
+        if (groupData == null) {
             // this is a different level (the enclosing query)
             return;
         }
-        Value v = (Value) values.get(this);
+        Value v = (Value) groupData.getCurrentGroupExprData(this);
         if (v == null) {
-            values.put(this, now); //如果不是非group by字段，则只保留第一次出现的值
-        } else {
-            // 如果不注释掉，这样的SQL会出错
-            // SELECT id/3 AS A, COUNT(*) FROM mytable GROUP BY A HAVING A>=0
-            
-            // if (!database.areEqual(now, v)) {
-            // throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
-            // }
+//<<<<<<< HEAD
+////<<<<<<< HEAD
+////            values.put(this, now); //如果不是非group by字段，则只保留第一次出现的值
+////=======
+//            groupData.setCurrentGroupExprData(this, now);
+//        } else {
+//            // 如果不注释掉，这样的SQL会出错
+//            // SELECT id/3 AS A, COUNT(*) FROM mytable GROUP BY A HAVING A>=0
+//            
+//            // if (!database.areEqual(now, v)) {
+//            // throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
+//            // }
+//=======
+            groupData.setCurrentGroupExprData(this, columnResolver.getValue(column));
+        } else if (!select.isGroupWindowStage2()) {
+            if (!session.areEqual(columnResolver.getValue(column), v)) {
+                throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL(false));
+            }
         }
     }
 
@@ -196,54 +237,48 @@ public class ExpressionColumn extends Expression {
     public Value getValue(Session session) {
         Select select = columnResolver.getSelect();
         if (select != null) {
-            HashMap<Expression, Object> values = select.getCurrentGroup();
-            if (values != null) {
-                Value v = (Value) values.get(this);
+            SelectGroups groupData = select.getGroupDataIfCurrent(false);
+            if (groupData != null) {
+                Value v = (Value) groupData.getCurrentGroupExprData(this);
                 if (v != null) {
                     return v;
+                }
+                if (select.isGroupWindowStage2()) {
+                    throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL(false));
                 }
             }
         }
         Value value = columnResolver.getValue(column);
         if (value == null) {
-            columnResolver.getValue(column);
-            throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL());
+            if (select == null) {
+                throw DbException.get(ErrorCode.NULL_NOT_ALLOWED, getSQL(false));
+            } else {
+                throw DbException.get(ErrorCode.MUST_GROUP_BY_COLUMN_1, getSQL(false));
+            }
         }
-        if (column.getEnumerators() != null) {
-            return ValueEnum.get(column.getEnumerators(), value.getInt());
+        /*
+         * ENUM values are stored as integers.
+         */
+        if (value != ValueNull.INSTANCE) {
+            ExtTypeInfo extTypeInfo = column.getType().getExtTypeInfo();
+            if (extTypeInfo != null) {
+                return extTypeInfo.cast(value, session);
+            }
         }
         return value;
     }
 
     @Override
-    public int getType() {
-        return column.getType();
+    public TypeInfo getType() {
+        return column == null ? TypeInfo.TYPE_UNKNOWN : column.getType();
     }
 
     @Override
     public void setEvaluatable(TableFilter tableFilter, boolean b) {
-        if (columnResolver != null && tableFilter == columnResolver.getTableFilter()) {
-            evaluatable = b;
-        }
     }
 
     public Column getColumn() {
         return column;
-    }
-
-    @Override
-    public int getScale() {
-        return column.getScale();
-    }
-
-    @Override
-    public long getPrecision() {
-        return column.getPrecision();
-    }
-
-    @Override
-    public int getDisplaySize() {
-        return column.getDisplaySize();
     }
 
     public String getOriginalColumnName() {
@@ -256,7 +291,13 @@ public class ExpressionColumn extends Expression {
 
     @Override
     public String getColumnName() {
-        return columnName != null ? columnName : column.getName();
+        if (column != null) {
+            if (columnResolver != null) {
+                return columnResolver.getColumnName(column);
+            }
+            return column.getName();
+        }
+        return columnName;
     }
 
     @Override
@@ -274,10 +315,13 @@ public class ExpressionColumn extends Expression {
     @Override
     public String getAlias() {
         if (column != null) {
+            if (columnResolver != null) {
+                return columnResolver.getColumnName(column);
+            }
             return column.getName();
         }
         if (tableAlias != null) {
-            return tableAlias + "." + columnName;
+            return tableAlias + '.' + columnName;
         }
         return columnName;
     }
@@ -295,7 +339,7 @@ public class ExpressionColumn extends Expression {
     @Override
     public boolean isEverything(ExpressionVisitor visitor) {
         switch (visitor.getType()) {
-        case ExpressionVisitor.OPTIMIZABLE_MIN_MAX_COUNT_ALL:
+        case ExpressionVisitor.OPTIMIZABLE_AGGREGATE:
             return false;
         case ExpressionVisitor.READONLY:
         case ExpressionVisitor.DETERMINISTIC:
@@ -304,19 +348,15 @@ public class ExpressionColumn extends Expression {
         case ExpressionVisitor.INDEPENDENT:
             return this.queryLevel < visitor.getQueryLevel();
         case ExpressionVisitor.EVALUATABLE:
-            // if the current value is known (evaluatable set)
-            // or if this columns belongs to a 'higher level' query and is
+            // if this column belongs to a 'higher level' query and is
             // therefore just a parameter
-            if (database.getSettings().nestedJoins) {
-                if (visitor.getQueryLevel() < this.queryLevel) {
-                    return true;
-                }
-                if (getTableFilter() == null) {
-                    return false;
-                }
-                return getTableFilter().isEvaluatable();
+            if (visitor.getQueryLevel() < this.queryLevel) {
+                return true;
             }
-            return evaluatable || visitor.getQueryLevel() < this.queryLevel;
+            if (getTableFilter() == null) {
+                return false;
+            }
+            return getTableFilter().isEvaluatable();
         case ExpressionVisitor.SET_MAX_DATA_MODIFICATION_ID:
             visitor.addDataModificationId(column.getTable().getMaxDataModificationId());
             return true;
@@ -327,8 +367,17 @@ public class ExpressionColumn extends Expression {
                 visitor.addDependency(column.getTable());
             }
             return true;
-        case ExpressionVisitor.GET_COLUMNS:
-            visitor.addColumn(column);
+        case ExpressionVisitor.GET_COLUMNS1:
+            if (column == null) {
+                throw DbException.get(ErrorCode.COLUMN_NOT_FOUND_1, getSQL(false));
+            }
+            visitor.addColumn1(column);
+            return true;
+        case ExpressionVisitor.GET_COLUMNS2:
+            if (column == null) {
+                throw DbException.get(ErrorCode.COLUMN_NOT_FOUND_1, getSQL(false));
+            }
+            visitor.addColumn2(column);
             return true;
         default:
             throw DbException.throwInternalError("type=" + visitor.getType());
@@ -348,18 +397,17 @@ public class ExpressionColumn extends Expression {
     	//按字段b删除，实际上就是删除b=true的记录
     	//如果没有为字段b建立索引，就在org.h2.table.TableFilter.prepare()中删除这个无用条件
         TableFilter tf = getTableFilter();
-        if (filter == tf && column.getType() == Value.BOOLEAN) {
+        if (filter == tf && column.getType().getValueType() == Value.BOOLEAN) {
             IndexCondition cond = IndexCondition.get(
                     Comparison.EQUAL, this, ValueExpression.get(
-                            ValueBoolean.get(true)));
+                            ValueBoolean.TRUE));
             filter.addIndexCondition(cond);
         }
     }
 
     @Override
     public Expression getNotIfPossible(Session session) {
-        return new Comparison(session, Comparison.EQUAL, this,
-                ValueExpression.get(ValueBoolean.get(false)));
+        return new Comparison(Comparison.EQUAL, this, ValueExpression.FALSE);
     }
 
 }

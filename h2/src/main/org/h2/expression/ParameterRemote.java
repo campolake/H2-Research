@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.expression;
@@ -11,6 +11,7 @@ import java.sql.ResultSetMetaData;
 import org.h2.api.ErrorCode;
 import org.h2.message.DbException;
 import org.h2.value.Transfer;
+import org.h2.value.TypeInfo;
 import org.h2.value.Value;
 
 /**
@@ -20,9 +21,7 @@ public class ParameterRemote implements ParameterInterface {
 
     private Value value;
     private final int index;
-    private int dataType = Value.UNKNOWN;
-    private long precision;
-    private int scale;
+    private TypeInfo type = TypeInfo.TYPE_UNKNOWN;
     private int nullable = ResultSetMetaData.columnNullableUnknown;
 
     public ParameterRemote(int index) {
@@ -55,18 +54,8 @@ public class ParameterRemote implements ParameterInterface {
     }
 
     @Override
-    public int getType() {
-        return value == null ? dataType : value.getType();
-    }
-
-    @Override
-    public long getPrecision() {
-        return value == null ? precision : value.getPrecision();
-    }
-
-    @Override
-    public int getScale() {
-        return value == null ? scale : value.getScale();
+    public TypeInfo getType() {
+        return value == null ? type : value.getType();
     }
 
     @Override
@@ -75,14 +64,12 @@ public class ParameterRemote implements ParameterInterface {
     }
 
     /**
-     * Write the parameter meta data from the transfer object.
+     * Read the parameter meta data from the transfer object.
      *
      * @param transfer the transfer object
      */
     public void readMetaData(Transfer transfer) throws IOException {
-        dataType = transfer.readInt();
-        precision = transfer.readLong();
-        scale = transfer.readInt();
+        type = transfer.readTypeInfo();
         nullable = transfer.readInt();
     }
 
@@ -92,12 +79,8 @@ public class ParameterRemote implements ParameterInterface {
      * @param transfer the transfer object
      * @param p the parameter
      */
-    public static void writeMetaData(Transfer transfer, ParameterInterface p)
-            throws IOException {
-        transfer.writeInt(p.getType());
-        transfer.writeLong(p.getPrecision());
-        transfer.writeInt(p.getScale());
-        transfer.writeInt(p.getNullable());
+    public static void writeMetaData(Transfer transfer, ParameterInterface p) throws IOException {
+        transfer.writeTypeInfo(p.getType()).writeInt(p.getNullable());
     }
 
 }

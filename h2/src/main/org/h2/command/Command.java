@@ -1,20 +1,25 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.command;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import org.h2.api.ErrorCode;
 import org.h2.engine.Constants;
 import org.h2.engine.Database;
+import org.h2.engine.DbObject;
 import org.h2.engine.Session;
 import org.h2.expression.ParameterInterface;
 import org.h2.message.DbException;
 import org.h2.message.Trace;
 import org.h2.result.ResultInterface;
+import org.h2.result.ResultWithGeneratedKeys;
+import org.h2.result.ResultWithPaddedStrings;
 import org.h2.util.MathUtils;
 
 /**
@@ -45,8 +50,8 @@ public abstract class Command implements CommandInterface {
 
     private boolean canReuse;
 
-    Command(Parser parser, String sql) {
-        this.session = parser.getSession();
+    Command(Session session, String sql) {
+        this.session = session;
         this.sql = sql;
         trace = session.getDatabase().getTrace(Trace.COMMAND);
     }
@@ -66,11 +71,6 @@ public abstract class Command implements CommandInterface {
      */
     @Override
     public abstract boolean isQuery();
-
-    /**
-     * Prepare join batching.
-     */
-    public abstract void prepareJoinBatch();
 
     /**
      * Get the list of parameters.
@@ -98,12 +98,21 @@ public abstract class Command implements CommandInterface {
      * Execute an updating statement (for example insert, delete, or update), if
      * this is possible.
      *
-     * @return the update count
+     * @param generatedKeysRequest
+     *            {@code false} if generated keys are not needed, {@code true} if
+     *            generated keys should be configured automatically, {@code int[]}
+     *            to specify column indices to return generated keys from, or
+     *            {@code String[]} to specify column names to return generated keys
+     *            from
+     * @return the update count and generated keys, if any
      * @throws DbException if the command is not an updating statement
      */
-    public int update() { //子类要实现这个方法
-        throw DbException.get(ErrorCode.METHOD_NOT_ALLOWED_FOR_QUERY);
-    }
+//<<<<<<< HEAD
+//    public int update() { //子类要实现这个方法
+//        throw DbException.get(ErrorCode.METHOD_NOT_ALLOWED_FOR_QUERY);
+//    }
+//=======
+    public abstract ResultWithGeneratedKeys update(Object generatedKeysRequest);
 
     /**
      * Execute a query statement, if this is possible.
@@ -111,10 +120,14 @@ public abstract class Command implements CommandInterface {
      * @param maxrows the maximum number of rows returned
      * @return the local result set
      * @throws DbException if the command is not a query
-     */ 
-    public ResultInterface query(int maxrows) { //子类要实现这个方法 
-        throw DbException.get(ErrorCode.METHOD_ONLY_ALLOWED_FOR_QUERY);
-    }
+//<<<<<<< HEAD
+//     */ 
+//    public ResultInterface query(int maxrows) { //子类要实现这个方法 
+//        throw DbException.get(ErrorCode.METHOD_ONLY_ALLOWED_FOR_QUERY);
+//    }
+//=======
+//     */
+    public abstract ResultInterface query(int maxrows);
 
     @Override
     public final ResultInterface getMetaData() {
@@ -148,23 +161,21 @@ public abstract class Command implements CommandInterface {
 
     @Override
     public void stop() {
-        session.endStatement();
-        session.setCurrentCommand(null);
         //DDL的isTransactional默认都是false，相当于每执行完一条DDL都默认提交事务
+        //session.setCurrentCommand(null);
         if (!isTransactional()) {
             session.commit(true);
         } else if (session.getAutoCommit()) { //如果是自动提交模式，那么执行完一条SQL时由系统自动提交，非自动提交模式由应用负责提交
             session.commit(false);
-        } else if (session.getDatabase().isMultiThreaded()) {
-            Database db = session.getDatabase();
-            if (db != null) {
-                if (db.getLockMode() == Constants.LOCK_MODE_READ_COMMITTED) {
-                    session.unlockReadLocks();
-                }
-            }
         }
-        //早期的版本就的是System.currentTimeMillis()，
-        //现在改成System.nanoTime()了，性能会好一点
+//<<<<<<< HEAD
+////<<<<<<< HEAD
+////        //早期的版本就的是System.currentTimeMillis()，
+////        //现在改成System.nanoTime()了，性能会好一点
+////=======
+//        session.endStatement();
+//=======
+//>>>>>>> c39744852e76bb33dd714d90c9bf0bbb9aab31f9
         if (trace.isInfoEnabled() && startTimeNanos > 0) {
             long timeMillis = (System.nanoTime() - startTimeNanos) / 1000 / 1000;
             //如果一条sql的执行时间大于100毫秒，记下它
@@ -188,26 +199,28 @@ public abstract class Command implements CommandInterface {
         startTimeNanos = 0;
         long start = 0;
         Database database = session.getDatabase();
-        //也跟executeUpdate()的情型一样，就算是查询也不例外
-        Object sync = database.isMultiThreaded() ? (Object) session : (Object) database;
+        //也跟executeUpdate()的情型一样，就算是查询也不例外 
+        Object sync = database.isMVStore() ? session : database;
         session.waitIfExclusiveModeEnabled();
         boolean callStop = true;
-        boolean writing = !isReadOnly();
-        if (writing) {
-            while (!database.beforeWriting()) {
-                // wait
-            }
-        }
+        //noinspection SynchronizationOnLocalVariableOrMethodParameter
         synchronized (sync) {
-            session.setCurrentCommand(this);
+            session.startStatementWithinTransaction(this);
             try {
                 while (true) {
                     database.checkPowerOff();
                     try {
                         ResultInterface result = query(maxrows);
                         callStop = !result.isLazy();
+                        if (database.getMode().padFixedLengthStrings) {
+                            return ResultWithPaddedStrings.get(result);
+                        }
                         return result;
                     } catch (DbException e) {
+                        // cannot retry DDL
+                        if (isCurrentCommandADefineCommand()) {
+                            throw e;
+                        }
                         start = filterConcurrentUpdate(e, start);
                     } catch (OutOfMemoryError e) {
                         callStop = false;
@@ -233,41 +246,42 @@ public abstract class Command implements CommandInterface {
                 database.checkPowerOff();
                 throw e;
             } finally {
+                session.endStatement();
                 if (callStop) {
                     stop();
-                }
-                if (writing) {
-                    database.afterWriting();
                 }
             }
         }
     }
 
     @Override
-    public int executeUpdate() {
+    public ResultWithGeneratedKeys executeUpdate(Object generatedKeysRequest) {
         long start = 0;
         Database database = session.getDatabase();
-        //默认一个数据库只允许一个线程更新，通过SET MULTI_THREADED 1可变成多线程的，
-        //这样同步对象是session，即不同的session之间可以并发使用数据库，但是同一个session内部是只允许一个线程。
-        //通过使用database作为同步对象就相当于数据库是单线程的
-        Object sync = database.isMultiThreaded() ? (Object) session : (Object) database;
+//<<<<<<< HEAD
+//        //默认一个数据库只允许一个线程更新，通过SET MULTI_THREADED 1可变成多线程的，
+//        //这样同步对象是session，即不同的session之间可以并发使用数据库，但是同一个session内部是只允许一个线程。
+//        //通过使用database作为同步对象就相当于数据库是单线程的
+//        Object sync = database.isMultiThreaded() || database.getStore() != null ? session : database;
+//=======
+        Object sync = database.isMVStore() ? session : database;
         session.waitIfExclusiveModeEnabled();
         boolean callStop = true;
-        boolean writing = !isReadOnly();
-        if (writing) {
-            while (!database.beforeWriting()) {
-                // wait
-            }
-        }
+        //noinspection SynchronizationOnLocalVariableOrMethodParameter
         synchronized (sync) {
             Session.Savepoint rollback = session.setSavepoint();
-            session.setCurrentCommand(this);
+            session.startStatementWithinTransaction(this);
+            DbException ex = null;
             try {
                 while (true) {
                     database.checkPowerOff();
                     try {
-                        return update();
+                        return update(generatedKeysRequest);
                     } catch (DbException e) {
+                        // cannot retry DDL
+                        if (isCurrentCommandADefineCommand()) {
+                            throw e;
+                        }
                         start = filterConcurrentUpdate(e, start); //如果是并发更新异常，会进行重试，直到超时为止
                     } catch (OutOfMemoryError e) {
                         callStop = false;
@@ -286,21 +300,29 @@ public abstract class Command implements CommandInterface {
                     database.shutdownImmediately();
                     throw e;
                 }
-                database.checkPowerOff();
-                if (s.getErrorCode() == ErrorCode.DEADLOCK_1) {
-                    session.rollback();
-                } else {
-                    session.rollbackTo(rollback, false);
+                try {
+                    database.checkPowerOff();
+                    if (s.getErrorCode() == ErrorCode.DEADLOCK_1) {
+                        session.rollback();
+                    } else {
+                        session.rollbackTo(rollback);
+                    }
+                } catch (Throwable nested) {
+                    e.addSuppressed(nested);
                 }
+                ex = e;
                 throw e;
             } finally {
                 try {
+                    session.endStatement();
                     if (callStop) {
                         stop();
                     }
-                } finally {
-                    if (writing) {
-                        database.afterWriting();
+                } catch (Throwable nested) {
+                    if (ex == null) {
+                        throw nested;
+                    } else {
+                        ex.addSuppressed(nested);
                     }
                 }
             }
@@ -309,30 +331,30 @@ public abstract class Command implements CommandInterface {
 
     private long filterConcurrentUpdate(DbException e, long start) {
         int errorCode = e.getErrorCode();
-        if (errorCode != ErrorCode.CONCURRENT_UPDATE_1 &&
-                errorCode != ErrorCode.ROW_NOT_FOUND_IN_PRIMARY_INDEX &&
-                errorCode != ErrorCode.ROW_NOT_FOUND_WHEN_DELETING_1) {
+        if (errorCode != ErrorCode.CONCURRENT_UPDATE_1 && errorCode != ErrorCode.ROW_NOT_FOUND_IN_PRIMARY_INDEX
+                && errorCode != ErrorCode.ROW_NOT_FOUND_WHEN_DELETING_1) {
             throw e;
         }
-        long now = System.nanoTime() / 1000000;
-        if (start != 0 && now - start > session.getLockTimeout()) {
-            throw DbException.get(ErrorCode.LOCK_TIMEOUT_1, e.getCause(), "");
+        long now = System.nanoTime();
+        if (start != 0 && TimeUnit.NANOSECONDS.toMillis(now - start) > session.getLockTimeout()) {
+            throw DbException.get(ErrorCode.LOCK_TIMEOUT_1, e);
         }
+        // Only in PageStore mode we need to sleep here to avoid busy wait loop
         Database database = session.getDatabase();
-        int sleep = 1 + MathUtils.randomInt(10);
-        while (true) {
-            try {
-                if (database.isMultiThreaded()) {
-                    Thread.sleep(sleep);
-                } else {
+        if (!database.isMVStore()) {
+            int sleep = 1 + MathUtils.randomInt(10);
+            while (true) {
+                try {
+                    // although nobody going to notify us
+                    // it is vital to give up lock on a database
                     database.wait(sleep);
+                } catch (InterruptedException e1) {
+                    // ignore
                 }
-            } catch (InterruptedException e1) {
-                // ignore
-            }
-            long slept = System.nanoTime() / 1000000 - now;
-            if (slept >= sleep) {
-                break;
+                long slept = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - now);
+                if (slept >= sleep) {
+                    break;
+                }
             }
         }
         return start == 0 ? now : start;
@@ -373,10 +395,19 @@ public abstract class Command implements CommandInterface {
     public void reuse() {
         canReuse = false;
         ArrayList<? extends ParameterInterface> parameters = getParameters();
-        for (int i = 0, size = parameters.size(); i < size; i++) {
-            ParameterInterface param = parameters.get(i);
+        for (ParameterInterface param : parameters) {
             param.setValue(null, true); //置null并关闭之前的值，关闭这个操作只是针对lob值的情况，见org.h2.value.Value.close()
         }
     }
 
+    public void setCanReuse(boolean canReuse) {
+        this.canReuse = canReuse;
+    }
+
+    public abstract Set<DbObject> getDependencies();
+
+    /**
+     * Is the command we just tried to execute a DefineCommand (i.e. DDL)
+     */
+    protected abstract boolean isCurrentCommandADefineCommand();
 }

@@ -1,6 +1,6 @@
 /*
- * Copyright 2004-2014 H2 Group. Multiple-Licensed under the MPL 2.0,
- * and the EPL 1.0 (http://h2database.com/html/license.html).
+ * Copyright 2004-2020 H2 Group. Multiple-Licensed under the MPL 2.0,
+ * and the EPL 1.0 (https://h2database.com/html/license.html).
  * Initial Developer: H2 Group
  */
 package org.h2.test.utils;
@@ -13,7 +13,7 @@ import java.nio.channels.FileChannel;
 import java.nio.channels.FileLock;
 import java.util.ArrayList;
 import java.util.Random;
-import org.h2.store.fs.FileBase;
+import org.h2.store.fs.FileBaseDefault;
 import org.h2.store.fs.FilePath;
 import org.h2.store.fs.FilePathWrapper;
 import org.h2.util.IOUtils;
@@ -150,7 +150,7 @@ public class FilePathReorderWrites extends FilePathWrapper {
 /**
  * A write-reordering file implementation.
  */
-class FileReorderWrites extends FileBase {
+class FileReorderWrites extends FileBaseDefault {
 
     private final FilePathReorderWrites file;
     /**
@@ -169,7 +169,7 @@ class FileReorderWrites extends FileBase {
     /**
      * The list of not yet applied to the base channel. It is sorted by time.
      */
-    private ArrayList<FileWriteOperation> notAppliedList = new ArrayList<FileWriteOperation>();
+    private ArrayList<FileWriteOperation> notAppliedList = new ArrayList<>();
 
     private int id;
 
@@ -187,18 +187,8 @@ class FileReorderWrites extends FileBase {
     }
 
     @Override
-    public long position() throws IOException {
-        return readBase.position();
-    }
-
-    @Override
     public long size() throws IOException {
         return readBase.size();
-    }
-
-    @Override
-    public int read(ByteBuffer dst) throws IOException {
-        return readBase.read(dst);
     }
 
     @Override
@@ -207,19 +197,12 @@ class FileReorderWrites extends FileBase {
     }
 
     @Override
-    public FileChannel position(long pos) throws IOException {
-        readBase.position(pos);
-        return this;
-    }
-
-    @Override
-    public FileChannel truncate(long newSize) throws IOException {
+    protected void implTruncate(long newSize) throws IOException {
         long oldSize = readBase.size();
         if (oldSize <= newSize) {
-            return this;
+            return;
         }
         addOperation(new FileWriteOperation(id++, newSize, null));
-        return this;
     }
 
     private int addOperation(FileWriteOperation op) throws IOException {
@@ -264,11 +247,6 @@ class FileReorderWrites extends FileBase {
         checkError();
         readBase.force(metaData);
         applyAll();
-    }
-
-    @Override
-    public int write(ByteBuffer src) throws IOException {
-        return write(src, readBase.position());
     }
 
     @Override
