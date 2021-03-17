@@ -6227,7 +6227,7 @@ public class Parser {
 	//sqlCommandChars
 	//characterTypes
 	//parseIndex(从0开始)
-
+    //此处主要识别了token的类型，其实可以把token识别出来，但此处并没有保存token?
 	//types初始化时每个元素都是0
 	//此方法将注释、$$用空格替换, 把"`"、"["换成双引号，
 	//同时对SQL中的每个字符标明其类型，以便下一步在read方法中识别sql中的各种结构。
